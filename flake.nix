@@ -1,6 +1,11 @@
 {
   description = "A very basic flake";
 
+  nixConfig = {
+    extra-substituers = [ "https://nix.math.univ-toulouse.fr/plm" ];
+    extra-trusted-public-keys = [ "plm:YcM7n7yaIYFE6xCvrexLgk8t28gC8Jkd22h+yhqjAc4=" ];
+  };
+
   outputs = { self, nixpkgs }:
     let
       system = "x86_64-linux";
@@ -8,10 +13,6 @@
       lib = pkgs.lib;
     in
     {
-      nixConfig = {
-        extra-substituers = [ "https://nix.math.univ-toulouse.fr/plm" ];
-        extra-trusted-public-keys = [ "plm:YcM7n7yaIYFE6xCvrexLgk8t28gC8Jkd22h+yhqjAc4=" ];
-      };
 
       packages.${system} = rec {
         default = xymon-client;
