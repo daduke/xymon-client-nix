@@ -2,7 +2,7 @@
   description = "A very basic flake";
 
   nixConfig = {
-    extra-substituers = [ "https://nix.math.univ-toulouse.fr/plm" ];
+    extra-trusted-substituers = [ "https://nix.math.univ-toulouse.fr/plm" ];
     extra-trusted-public-keys = [ "plm:YcM7n7yaIYFE6xCvrexLgk8t28gC8Jkd22h+yhqjAc4=" ];
   };
 
