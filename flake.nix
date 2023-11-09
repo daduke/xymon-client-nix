@@ -13,20 +13,10 @@
         extra-trusted-public-keys = [ "plm:YcM7n7yaIYFE6xCvrexLgk8t28gC8Jkd22h+yhqjAc4=" ];
       };
 
-      packages.${system} = {
-        hello = pkgs.stdenv.mkDerivation {
-          pname = "hello";
-          version = "2.12.1";
-
-          src = builtins.fetchurl {
-            url = "https://ftpmirror.gnu.org/hello/hello-2.12.1.tar.gz";
-            sha256 = "sha256-jZkUKv2SV28wsM18tCqNxoCZmLxdYH2Idh9RLibH2yA=";
-          };
-
-          doCheck = false;
-        };
-        xymon = pkgs.stdenv.mkDerivation {
-          pname = "xymon";
+      packages.${system} = rec {
+        default = xymon-client;
+        xymon-client = pkgs.stdenv.mkDerivation {
+          pname = "xymon-client";
           version = "4.3.30";
           buildInputs = with pkgs;[ pcre libtirpc];
           CONFTYPE = "client";
