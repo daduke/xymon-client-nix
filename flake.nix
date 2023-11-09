@@ -23,7 +23,7 @@
           CONFTYPE = "client";
           XYMONUSER="$(whoami)";
           XYMONTOPDIR="$(out)";
-          XYMONHOSTIP = "157.136.141.40";
+#          XYMONHOSTIP = "157.136.141.40";
           PKGBUILD = "yes";
           configureFlags = [
             "--client"
