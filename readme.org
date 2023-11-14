@@ -34,6 +34,38 @@ declare -F | grep -E ".*Phase""
 #+end_src
 
 #+RESULTS:
+: declare -f buildPhase
+: declare -f checkPhase
+: declare -f configurePhase
+: declare -f distPhase
+: declare -f fixupPhase
+: declare -f installCheckPhase
+: declare -f installPhase
+: declare -f patchPhase
+: declare -f showPhaseFooter
+: declare -f showPhaseHeader
+: declare -f unpackPhase
+: declare -f updateAutotoolsGnuConfigScriptsPhase
+
+If you want to inspect the code of a given phase :
+
+#+begin_src bash
+declare -f configurePhase
+#+end_src
+
+
+To test each phase manually :
+
+#+begin_src bash
+unpackPhase # create xymon-4.3.30
+cd xymon-4.3.30
+configurePhase
+buildPhase
+installPhase
+fixupPhase
+cd ..
+# results is in outputs
+#+end_src
 
 
 
