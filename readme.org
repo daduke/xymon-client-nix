@@ -1,0 +1,43 @@
+#+title: nix package for xymon-client
+
+
+* Build
+#+begin_src bash
+nix build git+https://plmlab.math.cnrs.fr/nix/xymon-client.git --accept-flake-config
+#+end_src
+
+
+
+*
+* Modify build process
+
+Create a new shell with tools to build ~oxymon-cient~
+#+begin_src bash
+nix develop git+https://plmlab.math.cnrs.fr/nix/xymon-client.git --accept-flake-config
+#+end_src
+
+~stdenvk.mkDerivation~ has the following [[https://github.com/NixOS/nixpkgs/blob/master/pkgs/stdenv/generic/setup.sh#L1556-L1560][phases]] :
+- unpackPhase
+- patchPhase
+- configurePhase
+- buildPhase
+- checkPhase
+- installPhase
+- fixupPhase
+- installCheckPhase
+- distPhase
+
+A phase is a bash function :
+
+#+begin_src bash :dir /tmp/dev :results output
+declare -F | grep -E ".*Phase""
+#+end_src
+
+#+RESULTS:
+
+
+
+* Use cache
+With ~--accept-flacke-config~, you use substituters defined in [[https://plmlab.math.cnrs.fr/nix/xymon-client/-/blob/main/flake.nix?ref_type=heads#L4-7][flake.nix#nixConfig]].
+
+If you don't, you will rebuild locally ~xymon-client~.

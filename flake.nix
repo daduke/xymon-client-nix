@@ -1,6 +1,7 @@
 {
-  description = "A very basic flake";
+  description = "xymon client packaging";
 
+  # cache definition
   nixConfig = {
     extra-substituters = [ "https://nix.math.univ-toulouse.fr/plm" ];
     extra-trusted-public-keys = [ "plm:YcM7n7yaIYFE6xCvrexLgk8t28gC8Jkd22h+yhqjAc4=" ];
@@ -23,7 +24,7 @@
           CONFTYPE = "client";
           XYMONUSER="$(whoami)";
           XYMONTOPDIR="$(out)";
-#          XYMONHOSTIP = "157.136.141.40";
+          XYMONHOSTIP = "127.0.0.1";
           PKGBUILD = "yes";
           configureFlags = [
             "--client"
