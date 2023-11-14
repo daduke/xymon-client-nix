@@ -4,14 +4,15 @@
 * Build
 #+begin_src bash
 nix build git+https://plmlab.math.cnrs.fr/nix/xymon-client.git --accept-flake-config
+# => creates result in current directory
 #+end_src
 
 
+* Develop
 
-*
-* Modify build process
+To modify or inspect the package construction process, you can
+create a new shell with tools to build ~xymon-cient~
 
-Create a new shell with tools to build ~oxymon-cient~
 #+begin_src bash
 nix develop git+https://plmlab.math.cnrs.fr/nix/xymon-client.git --accept-flake-config
 #+end_src
