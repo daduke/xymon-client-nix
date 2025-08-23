@@ -12,6 +12,7 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       lib = pkgs.lib;
+      stdenv = pkgs.stdenv;
     in
     {
 
@@ -44,18 +45,19 @@
           defaultxymon = ./default-xymon;
           service = ./xymon-client.service;
 
-	  installPhase = ''
-	    runHook preInstall
-	    mkdir -p $out/etc/xymon
-	    mkdir -p $out/var/lib/xymon
-            mkdir -p $out/etc/default
-            mkdir -p $out/run/systemd/system
-	    cp -r $etcxymon/* $out/etc/xymon/
-	    cp -r $varlibxymon/* $out/var/lib/xymon/
-	    cp $defaultxymon $out/etc/default/xymon-client
-	    cp $service $out/run/systemd/system/xymon-client.service
-	    runHook postInstall
-	  '';
+  	  installPhase = ''
+  	    runHook preInstall
+            make install DESTDIR=$out
+  	    mkdir -p $out/etc/xymon
+  	    mkdir -p $out/var/lib/xymon
+              mkdir -p $out/etc/default
+              mkdir -p $out/run/systemd/system
+  	    cp -r $etcxymon/* $out/etc/xymon/
+  	    cp -r $varlibxymon/* $out/var/lib/xymon/
+  	    cp $defaultxymon $out/etc/default/xymon-client
+  	    cp $service $out/run/systemd/system/xymon-client.service
+  	    runHook postInstall
+  	  '';
 
 	  postInstall = ''
           '';
@@ -73,6 +75,8 @@
           system.activationScripts.xymonVarLib.text = ''
             mkdir -p /var/lib/xymon
             cp -r ${self.packages.${system}.xymon-client}/var/lib/xymon/* /var/lib/xymon/
+            chown -R xymon: /var/lib/xymon
+            chmod u+rwx /var/lib/xymon/tmp
           '';
 
           system.activationScripts.xymonService.text = ''
