@@ -6,7 +6,6 @@
     system = "x86_64-linux";
     pkgs = nixpkgs.legacyPackages.${system};
     lib = pkgs.lib;
-    #stdenv = pkgs.stdenv;
   in
   {
     packages.${system} = rec {
