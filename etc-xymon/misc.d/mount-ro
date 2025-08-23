@@ -1,0 +1,7 @@
+#!/bin/sh
+
+if grep -E ' ro[, ]' /proc/mounts | grep -Ev ' (iso9660|nfs4?|udf|cifs|smbfs|tmpfs|proc|sysfs|squashfs|fuse|ramfs) ' ; then
+	exit 2
+else
+	echo "No filesystems mounted read-only"
+fi

@@ -1,0 +1,12 @@
+# dirtyvcs xymon-/hobbit-plugin: Where to look for VCS repositories
+/etc
+/etc/*
+/etc/amavis/conf.d
+/opt
+/opt/*
+/opt/*/bin
+/opt/*/sbin
+/usr/local/bin
+/usr/local/sbin
+/var/yp
+/var/yp/ypfiles

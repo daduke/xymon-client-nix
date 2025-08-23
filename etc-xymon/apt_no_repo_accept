@@ -1,0 +1,5 @@
+libcryptx-perl
+libnet-mqtt-simple-perl
+# BEGIN ANSIBLE MANAGED BLOCK
+leds-parport
+# END ANSIBLE MANAGED BLOCK

@@ -1,0 +1,18 @@
+# generic config file for the temp test
+# specify local additions in /etc/xymon/temp.local.yaml
+---
+disk:
+  yellow: 47
+  red:    55
+
+cpu:
+  yellow: 80
+  red:    90
+
+gpu:
+  yellow: 80
+  red:    90
+
+ram:
+  yellow: 80
+  red:    90

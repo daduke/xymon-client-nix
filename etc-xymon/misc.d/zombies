@@ -1,0 +1,117 @@
+#!/usr/bin/perl
+use 5.010;
+use strict;
+use warnings;
+
+use File::Basename qw(dirname);
+use List::MoreUtils qw(all);
+
+# minimum age (in seconds) for a process to be reported as a zombie
+# note: this is the age since the start of the process.  We do not
+#       know how long the process has been a zombie
+my $MIN_AGE = 5 * 60;
+
+# Function to parse config file; splits at first blanks.
+sub file_to_hash_of_regexp_keys_and_values($) {
+    my %regexps = ();
+    my $filename = shift;
+    open(my $fh, '<', $filename) or return %regexps;
+    while(<$fh>) {
+        unless (/^#|^\s*$/) {
+            chomp;
+            my ($key, $value) = split(/\s+/, $_, 2);
+            $regexps{$key} = $value;
+        }
+    }
+    return %regexps;
+}
+
+# status of a single process as a hash reference
+# call with argument /proc/:pid/status
+sub process_status_href {
+    my ($status_file) = @_;
+
+    my (%status_hash) = ();
+    # open will fail if the process died in the mean time and we return nothing
+    open(my $fh, '<', $status_file) or return;
+    while (my $line = <$fh>) {
+        chomp $line;
+        next if $line eq '';
+        my ($key, $value) = split(qr(:\s+), $line, 2);
+        $status_hash{$key} = $value;
+    }
+    close($fh);
+    # if the process died some the status info may be imcomplete
+    # we require at least the keys shown here otherwise we return nothing
+    return unless all { defined($status_hash{$_}) } qw(Pid Name State PPid);
+    return \%status_hash;
+}
+
+# hash reference of all processes with pid as key and status href as value
+sub all_processes_href {
+    my %proc_hash = ();
+    for my $status_file (glob('/proc/*/status')) {
+        my $stat_hash = process_status_href($status_file);
+        next unless $stat_hash;
+        $proc_hash{$stat_hash->{Pid}} = $stat_hash;
+    }
+    return \%proc_hash;
+}
+
+my $xymon_config_dir = dirname($0).'/..';
+my $ignore_file = $xymon_config_dir."/zombies_ignore";
+my %ignore = file_to_hash_of_regexp_keys_and_values($ignore_file);
+
+my $zombies = 0;
+my $ignored = 0;
+
+my $all_procs = all_processes_href();
+my %zombie_parents = ();
+sleep 1; # allow parents to reap their children before we loop through the processes
+for my $pid (keys %$all_procs) {
+    my $status = $all_procs->{$pid};
+    next unless $status->{State} =~ /Z/;
+    # ignore zombies that are too young
+    my $age_in_days = -M "/proc/$pid";
+    # may have vanished if the zombie process has been waited for in the mean time
+    next unless $age_in_days;
+    # choose minimum age of $MIN_AGE seconds (defined above)
+    next if ($age_in_days * 24 * 60 * 60) < $MIN_AGE;
+    my $ppid = $status->{PPid};
+    $zombie_parents{$ppid} ||= [$ppid];
+    push(@{$zombie_parents{$ppid}}, $pid);
+}
+
+for my $ppid (keys %zombie_parents) {
+    my $status = $all_procs->{$ppid};
+    my $uid = (split(/\s+/, $status->{Uid}))[0];
+    my $user = getpwuid($uid) // $uid;
+    my $name = $status->{Name};
+    my $proclist = join(',', @{$zombie_parents{$ppid}});
+    my $zombie = 1;
+
+    say "parent of zombies: $name by user $user";
+    system "ps fup $proclist | sed -e 's/&/\\&amp;/g; s/</\\&lt;/g; s/>/\\&gt;/g'";
+    foreach my $regexp (keys %ignore) {
+        if ($regexp =~ /:\^/) {
+            my ($user_re, $process_re) = split(/:\^/, $regexp, 2);
+            if ($user =~ /^$user_re$/ and $name =~ /^$process_re$/) {
+                say "$name zombies ignored under user $user: $ignore{$regexp}";
+                $zombie = 0;
+            }
+        }
+        else {
+            if ($name =~ /^$regexp$/) {
+                say "$name zombies ignored: $ignore{$regexp}";
+                $zombie = 0;
+            }
+        }
+    }
+    say ''; # separate zombie groups
+    $zombies += $zombie;
+    $ignored += (1 - $zombie);
+}
+
+say(($zombies + $ignored) . ' process(es) with zombie children, ' . $ignored . ' ignored');
+
+exit ($zombies ? 1 : 0);

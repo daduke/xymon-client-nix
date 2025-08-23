@@ -1,0 +1,12 @@
+---
+entropy:
+    loop: 10
+    delay: 2
+    warning: 200
+    critical: 100
+
+ntpq:
+    ntpd_pid_file: '/var/run/ntpd.pid'
+    offset_warning: 100
+    offset_critical: 2000
+

@@ -1,0 +1,31 @@
+# generic config file for the libs test
+# specify local additions in /etc/xymon/libs.local.yaml
+---
+whitelist:
+  *:
+    - '^/proc/'
+    - '^/run/'
+    - '^/tmp/'
+    - '^/var/tmp/'
+    - '^/var/log/'
+    - '^/var/run/'
+    - '^/var/lib/nfs/etab'
+    - '^/SYS'
+    - '^/drm'
+    - '^/dev/zero'
+    - '^/dev/shm'
+    - '^/dev/pts'
+    - '^/var/lib/lightdm/\.speech-dispatcher/'
+    - '^/var/lib/postgresql/'
+    - '\.cache'
+    - '/\.config/'
+    - '/\.local/share/gvfs-metadata/'
+    - 'dovecot(\.index|-uidlist)'
+    - '^/memfd:'
+  /usr/sbin/memlockd:
+    - '.*'
+  /usr/sbin/mysqld:
+    - '^/\[aio\]$'
+  /usr/share/spotify/spotify:
+    # not anchored so it catches $HOME/tmp as well
+    - 'tmp/\.org\.chromium\.Chromium\.'
