@@ -1,0 +1,205 @@
+#!/usr/bin/perl
+
+# Copyright (C) 2010-2016 Axel Beckert <abe@debian.org>
+#
+# Based on the generic hobbit plugin template by Christoph Berg.
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following
+# conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+use strict;
+use warnings;
+use Hobbit;
+use List::Util qw(min);
+use Date::Parse;
+
+# Configuration
+
+my %threshold_yellow = (
+    active	    => 100,
+    deferred	    => 50,
+    'local'	    => 1,
+    'local_minutes' => 6, # Minutes
+);
+my %threshold_red = (
+    active   => 500,
+    deferred => 250,
+    'local'  => 50,
+    'local_minutes' => 60, # Minutes
+);
+my $recipients_factor = 10;
+
+# Initialisation
+
+$ENV{'PATH'} = '/bin:/sbin:/usr/bin:/usr/sbin';
+$ENV{'LC_ALL'} = 'C';
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+my $mailq = '/usr/bin/mailq';
+exit 0 unless -x $mailq;
+
+my $bb   = new Hobbit('mq');
+my $data = Hobbit::trends();
+
+my %qflag = (
+    ' ' => 'deferred',
+    '*' => 'active',
+    '!' => 'hold',
+);
+
+
+my @mailq = `$mailq`;
+my %queue = ();
+my %queue_size       = map { $_ => 0 } values %qflag;
+my %queue_mails      = map { $_ => 0 } values %qflag;
+my %queue_recipients = map { $_ => {} } values %qflag;
+my $current_qid = undef;
+my $current_queue = undef;
+
+# Parsing mailq output and counting
+
+foreach my $mqline (@mailq) {
+    if ($mqline =~ /^([0-9A-Za-z]+)([ !*]?)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+)\s+(.+)$/) {
+	my ($qid, $qfl, $size, $date, $from) = ($1, $2, $3, $4, $5);
+	$current_qid = $qid;
+	$current_queue = $qflag{$qfl};
+	$queue{$qid} = {
+	    'queue'  => $current_queue,
+	    'size'   => $size,
+	    'date'   => $date,
+	    'reason' => '',
+	};
+
+	# accounting
+	$queue_size{$current_queue} += $size;
+	$queue_mails{$current_queue}++;
+
+	next;
+    }
+
+    # reason
+    if ($mqline =~ /^\s*\((.+)\)$/) {
+	my $reason = $1;
+	$queue{$current_qid}{'reason'} = $reason;
+	next;
+    }
+
+    # recipients
+    if ($mqline =~ /^\s+(.+)$/) {
+	$queue_recipients{$current_queue}{$1} = 1;
+	next;
+    }
+}
+
+# Threshold checks and colors
+
+$bb->print("\n");
+
+# Handle active and deferred queues according to given thresholds
+foreach my $q (qw(active deferred)) {
+    $bb->color_line($queue_mails{$q} > $threshold_yellow{$q} ?
+		    $queue_mails{$q} > $threshold_red{$q} ?
+		    'red' : 'yellow' : 'green',
+		    sprintf("%5i       mails in <b>$q</b> queue\n", $queue_mails{$q}));
+
+    my $qr = keys %{$queue_recipients{$q}};
+
+    $bb->color_line($qr > $threshold_yellow{$q} * $recipients_factor ?
+		    $qr> $threshold_red{$q}    * $recipients_factor ?
+		    'red' : 'yellow' : 'green',
+		    sprintf("%5i  recipients in <b>$q</b> queue\n", $qr));
+}
+
+my $qr = keys %{$queue_recipients{hold}};
+
+# If there's any mail hold, then there's something to do => yellow
+my $hold_color = $queue_mails{hold} ? 'yellow' : 'green';
+$bb->color_line($hold_color, sprintf("%5i       mails in <b>hold</b> queue\n", $queue_mails{hold}));
+$bb->color_line($hold_color, sprintf("%5i  recipients in <b>hold</b> queue\n", $qr));
+
+my $mailqfooter = $mailq[-1];
+$mailqfooter =~ s/^-- (\d+ \w+ in )(\d+)( Requests?\.)$/$1$2$3/i;
+my $mails_overall = $2 || 0;
+$bb->sprintf("\nAll Postfix mail queues together: %i recipients and $mailqfooter\n",
+	     keys(%{$queue_recipients{active}}) +
+	     keys(%{$queue_recipients{deferred}}) +
+	     $qr);
+
+# Checking for RBL issues
+my $local_issues = 0;
+my $oldest_local_issues = time();
+foreach my $qid (sort keys %queue) {
+    next if $queue{$qid}{queue} eq 'hold';
+    my $reason = $queue{$qid}{reason};
+    if ($reason =~ /^temporary failure/) {
+	$local_issues++;
+	$oldest_local_issues = min($oldest_local_issues,
+				   str2time($queue{$qid}{date}));
+    }
+    if (($reason =~ /refused to talk to me/ and
+	 $reason !~ /too many connections/i and
+	 $reason !~ /(too|is|are) busy/i and
+	 $reason !~ /too much load/i and
+	 $reason !~ /out of connection slots/i and
+	 $reason !~ /local problem/i and
+	 $reason !~ /temporarily unavailable/i and
+	 $reason !~ /will be stopped/i and
+	 $reason !~ /gr[ae]y-?list/i and
+	 $reason !~ /delay-?gr[ae]y/i and
+	 $reason !~ /\bocmail\d+\.in\b/i and
+	 $reason !~ /fakemx/i) or
+	$reason =~/unsolicited mail originating from your IP address/) {
+	$bb->color_line('yellow', "Possible RBL issues: $reason\n");
+    }
+}
+
+if ($local_issues) {
+    $bb->color_line(
+	$local_issues > $threshold_red{'local'}    ? 'red'    :
+	$local_issues > $threshold_yellow{'local'} ? 'yellow' :
+						     'green'  ,
+	"<strong>$local_issues</strong> possible <strong>local</strong> delivery problems. Check mail queue items with reason 'temporary failure'.\n");
+
+    my $timediff = time()-$oldest_local_issues;
+    $bb->color_line(
+	$timediff > $threshold_red{'local_minutes'}    * 60 ? 'red'    :
+	$timediff > $threshold_yellow{'local_minutes'} * 60 ? 'yellow' :
+							      'green'  ,
+	"Oldest local delivery problem dates back to ".localtime($oldest_local_issues)."\n");
+}
+
+# Data for graphs
+foreach my $type (qw(mails recipients)) {
+    $data->print("[mq,$type.rrd]\n");
+    foreach my $q (qw(active deferred hold)) {
+        $data->print(
+            "DS:$q$type:GAUGE:600:U:U ".
+            ($type eq 'mails' ? $queue_mails{$q} :
+             $type eq 'recipients' ? int keys %{$queue_recipients{$q}} :
+             die "Assertion: Unexpected type '$type'").
+            "\n");
+    }
+}
+$bb->graph('mq_mails');
+$bb->graph('mq_recipients');
+
+$bb->send;
+$data->send;

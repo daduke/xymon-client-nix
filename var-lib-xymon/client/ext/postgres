@@ -1,0 +1,193 @@
+#!/usr/bin/perl -w
+# Plugin for monitor postgres connections.
+#
+# Copyright (C) 2008 Christoph Berg <myon@debian.org>
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following
+# conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+use strict;
+use DBI;
+use DBD::Pg;
+use Hobbit;
+use lib '/usr/share/postgresql-common';
+use PgCommon;
+
+my $version = PgCommon::get_newest_version () or die "no postgres version found";
+my @clusters = PgCommon::get_version_clusters ($version) or die "no postgres/$version clusters found";
+
+foreach my $cluster (@clusters) {
+	my $clustername = `hostname -f`;
+	chomp $clustername;
+	$clustername =~ s/[^.]*\./$cluster./ if ($cluster ne "main");
+
+	my $bb = new Hobbit ({ hostname => $clustername, test => 'postgres',
+		text => "Connections to cluster $version/$cluster:\n" });
+
+	my $socketdir = PgCommon::get_cluster_socketdir ($version, $cluster);
+	my $port = PgCommon::get_cluster_port ($version, $cluster);
+
+	my %dbh;
+	$dbh{'postgres'} = DBI->connect ("DBI:Pg:dbname=postgres;host=$socketdir;port=$port", "", "",
+		{RaiseError => 1}) || die;
+
+	my $sql = "SELECT datname, count (pg_stat_activity.datname)
+		FROM pg_database LEFT JOIN pg_stat_activity USING (datname)
+		WHERE datallowconn AND datname <> 'template1'
+		GROUP BY datname ORDER BY datname";
+	my $sth = $dbh{'postgres'}->prepare($sql);
+	$sth->execute();
+
+	my @db = ();
+	while ( my ($dbname, $curr_conn) = $sth->fetchrow_array ) {
+		$bb->color_print ('green', "$dbname : $curr_conn\n"); # GAUGE
+		push @db, $dbname;
+	}
+	$bb->send;
+
+	foreach my $dbname (@db) {
+
+		next if $dbname eq 'postgres';
+	my $bb = new Hobbit ("bbpostgres"); # dummy to catch connection errors
+	$dbh{$dbname} = DBI->connect ("DBI:Pg:dbname=$dbname;host=$socketdir;port=$port", "", "",
+		{RaiseError => 1}) || die "";
+	}
+
+##############
+
+	$bb = new Hobbit ({ hostname => $clustername, test => 'pgtbl',
+			text => "Table activity on cluster $version/$cluster:\n" }); # DERIVE
+	foreach my $dbname (@db) {
+		$bb->print ("\n");
+
+		my $sql = "SELECT SUM(n_tup_ins), SUM(n_tup_upd), SUM(n_tup_del)
+			   FROM pg_stat_user_tables";
+		my $sth = $dbh{$dbname}->prepare($sql);
+		$sth->execute();
+		my ($n_tup_ins, $n_tup_upd, $n_tup_del) = $sth->fetchrow();
+		$bb->color_print ('green', "${dbname}_delete : $n_tup_del\n") if ($n_tup_del);
+		$bb->color_print ('green', "${dbname}_insert : $n_tup_ins\n") if ($n_tup_ins);
+		$bb->color_print ('green', "${dbname}_update : $n_tup_upd\n") if ($n_tup_upd);
+	}
+
+	$bb->send;
+
+##############
+
+	$bb = new Hobbit ({ hostname => $clustername, test => 'pgtpl',
+			text => "Tuple reads on cluster $version/$cluster:\n" }); # DERIVE
+	foreach my $dbname (@db) {
+		$bb->print ("\n");
+
+		my $sql = "SELECT SUM(seq_tup_read), SUM(idx_tup_fetch) FROM pg_stat_user_tables";
+		my $sth = $dbh{$dbname}->prepare($sql);
+		$sth->execute();
+		my ($seq_tup_read,$idx_tup_fetch) = $sth->fetchrow();
+		$bb->color_print ('green', "${dbname}_idx_fetch : $idx_tup_fetch\n") if ($idx_tup_fetch);
+		$bb->color_print ('green', "${dbname}_seq_read : $seq_tup_read\n") if ($seq_tup_read);
+	}
+
+	$bb->send;
+
+##############
+
+	$bb = new Hobbit ({ hostname => $clustername, test => 'pgscn',
+                        text => "Scans initiated on cluster $version/$cluster:\n" }); # DERIVE
+	foreach my $dbname (@db) {
+		$bb->print ("\n");
+
+		my $sql = "SELECT SUM(seq_scan), SUM(idx_scan) FROM pg_stat_user_tables";
+		my $sth = $dbh{$dbname}->prepare($sql);
+		$sth->execute();
+		my ($seq_scan,$idx_scan) = $sth->fetchrow();
+		$bb->color_print ('green', "${dbname}_idx_scan : $idx_scan\n") if ($idx_scan);
+		$bb->color_print ('green', "${dbname}_seq_scan : $seq_scan\n") if ($seq_scan);
+	}
+
+	$bb->send;
+
+##############
+
+	$bb = new Hobbit ({ hostname => $clustername, test => 'pgblk',
+                        text => "Cache blocks on cluster $version/$cluster:\n" }); # DERIVE
+	foreach my $dbname (@db) {
+		$bb->print ("\n");
+
+		my $sql = "SELECT blks_read, blks_hit FROM pg_stat_database WHERE datname='$dbname'";
+		my $sth = $dbh{$dbname}->prepare($sql);
+		$sth->execute();
+		my ($blks_read,$blks_hit) = $sth->fetchrow();
+		$bb->color_print ('green', "${dbname}_blks_hit : $blks_hit\n") if ($blks_hit);
+		$bb->color_print ('green', "${dbname}_blks_read : $blks_read\n") if ($blks_read);
+		#my $read_hitratio = $blks_read+$blks_hit != 0 ? sprintf "%.2f", ($blks_hit/($blks_read+$blks_hit))*100 : 100;
+		#$out .= "${dbname}_read_hitratio : $read_hitratio\n"; # GAUGE
+	}
+
+	$bb->send;
+
+##############
+
+	$bb = new Hobbit ({ hostname => $clustername, test => 'pgxlg',
+                        text => "Xlog activity on cluster $version/$cluster:\n" }); #DERIVE
+	foreach my $dbname (@db) {
+		$bb->print ("\n");
+
+		my $sql = "SELECT xact_commit, xact_rollback FROM pg_stat_database WHERE datname='$dbname'";
+		my $sth = $dbh{$dbname}->prepare($sql);
+		$sth->execute();
+		my ($curr_xact_commit,$curr_xact_rollback) = $sth->fetchrow();
+		$bb->color_print ('green', "${dbname}_commit : $curr_xact_commit\n") if ($curr_xact_commit);
+		$bb->color_print ('green', "${dbname}_rollback : $curr_xact_rollback\n") if ($curr_xact_rollback);
+	}
+
+	$bb->send;
+
+##############
+
+	$bb = new Hobbit ({ hostname => $clustername, test => 'pglck',
+                        text => "Locks on cluster $version/$cluster:\n" }); #GAUGE
+	foreach my $dbname (@db) {
+		$bb->print ("\n");
+
+		my $sql="SELECT mode, COUNT(mode) FROM pg_locks GROUP BY mode ORDER BY mode";
+		my $sth = $dbh{$dbname}->prepare ($sql);
+		$sth->execute ();
+		my $locks = 0;
+		my $exlocks = 0;
+		while (my ($mode, $count) = $sth->fetchrow ()) {
+		    if ($mode =~ /exclusive/i) {
+			$exlocks = $exlocks + $count;
+		    }
+		    $locks = $locks+$count;
+		}
+		$bb->color_print ('green', "${dbname}_exlocks : $exlocks\n") if ($exlocks);
+		$bb->color_print ('green', "${dbname}_locks : $locks\n") if ($exlocks);
+	}
+
+	$bb->send;
+
+##############
+
+	foreach my $dbname (@db) {
+		$dbh{$dbname}->disconnect;
+	}
+
+}

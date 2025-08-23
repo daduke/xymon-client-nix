@@ -1,0 +1,51 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Hobbit;
+
+my @files = ( '/proc/net/snmp', '/proc/net/netstat' );
+my $bb = new Hobbit ({ test => 'netstats'});
+my $trends = Hobbit::trends();
+
+my %asoc;
+my @fields = ( 'Tcp.InErrs' ,
+	    'Tcp.InCsumErrors',
+	    'TcpExt.ListenDrops',
+	    'TcpExt.TCPTimeouts',
+	    'TcpExt.TCPLostRetransmit',
+	    'TcpExt.TCPDSACKRecv',
+	    'TcpExt.TCPDSACKOldSent',
+	    'TcpExt.TCPDSACKOfoSent' );
+	
+foreach my $file (@files) {
+
+    open (IN, "< $file");
+	while (my $keyline = <IN>) {
+		my $valline = <IN>;
+		$keyline =~ s/^(.*): //;	
+		$valline =~ s/^(.*): //;
+		chomp($keyline); chomp($valline);
+		my $module = $1;
+		my @keys = split(/ /, $keyline);
+		my @vals = split(/ /, $valline);
+		$bb->print ("<h2>$module</h2>\n");
+		for my $i (0 .. $#keys) {
+			$asoc{$module.'.'.$keys[$i]} = $vals[$i];
+			$bb->print ($keys[$i]. ": " .$vals[$i]. "\n" );
+		}
+	}
+    close IN;
+}
+
+foreach my $field (@fields) {
+	if (not defined $asoc{$field}) {
+		next;
+	}
+	$trends->print("[netstats,${field}.rrd]\n");
+	$trends->print("DS:count:DERIVE:600:0:U $asoc{$field}\n");
+}
+$bb->color_line("green", "OK\n");
+$bb->send;
+$trends->send;
+

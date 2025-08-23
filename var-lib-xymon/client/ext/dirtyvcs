@@ -1,0 +1,113 @@
+#!/usr/bin/perl -w
+
+# Copyright (C) 2010-2014 Axel Beckert <abe@debian.org>
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following
+# conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+my $ext_vcs_config = "/etc/xymon";
+use strict;
+use Hobbit qw(file_to_list_of_globs);
+use File::Which;
+
+my $dirty_vcs_dirs_file = $ext_vcs_config."/dirty_vcs_dirs";
+my $dirty_vcs_fsck_skip = 'dirtyvcs_no_fsck';
+my @possible_repos = file_to_list_of_globs($dirty_vcs_dirs_file);
+
+$ENV{'PATH'} = '/bin:/sbin:/usr/bin:/usr/sbin';
+$ENV{'LC_ALL'} = 'C';
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+my $bb = new Hobbit('dirtyvcs');
+
+my $empty_re = qr/^\s*$/s;
+my %vcs_to_dir = (
+    'git' => { dir => '.git',
+               clean => qr/nothing to commit,? \(?working \w+ clean/ },
+    'bzr' => { dir => '.bzr',
+               clean => $empty_re },
+    'hg'  => { dir => '.hg',
+               clean => $empty_re },
+    'svn' => { dir => '.svn',
+               clean => $empty_re },
+);
+
+my @blacklist = map { s/^!//; $_ } grep { /^!/ } @possible_repos;
+
+
+my $repos_found = 0;
+foreach my $vcs (sort keys %vcs_to_dir) {
+    my $vcs_avail = which($vcs);
+
+    foreach my $path (sort @possible_repos) {
+        foreach my $repo (sort grep { -d "$_/$vcs_to_dir{$vcs}{dir}" and
+                                     !-d "$_/../$vcs_to_dir{$vcs}{dir}" } glob("$path")) {
+            next if grep { $_ eq $repo } map { glob } @blacklist;
+
+            $repos_found++;
+            if ($vcs_avail) {
+                if ($vcs eq 'git') {
+                    if (qx(git config --get safe.directory) !~ /^\Q$repo\E$/m) {
+                        system(qw(git config --global --add safe.directory), $repo);
+                    }
+                }
+                chdir($repo);
+                my $status = `$vcs status 2>&1`;
+                if ($status =~ $vcs_to_dir{$vcs}{clean} and
+                    $status =~ /warning|permission denied|fatal|abort|unable/i) {
+                    $bb->color_line('yellow', "$repo ($vcs) is clean, but has warnings or errors:\n".
+                                    "<blockquote>$status</blockquote>");
+                } elsif ($status =~ $vcs_to_dir{$vcs}{clean}) {
+                    $bb->color_line('green', "$repo ($vcs) is clean".
+                                    ($vcs_to_dir{$vcs}{clean} eq $empty_re ?
+                                     ".\n" : ":\n<blockquote>$status</blockquote>"));
+                } else {
+                    $bb->color_line('yellow', "$repo ($vcs) is dirty:\n".
+                                    "<blockquote>$status</blockquote>");
+                }
+
+                if ($vcs eq 'git' and
+                    !-e "$repo/.$dirty_vcs_fsck_skip" and
+                    !-e "$repo/.git/$dirty_vcs_fsck_skip") {
+                    # Options --no-dangling and --no-progress unknown in Squeeze
+                    my $status = `git fsck 2>&1 | grep -Ev 'Checking|dangling' 2>&1`;
+                    if ($status =~ /missing|broken/) {
+                        $bb->color_line('red', "fsck for $repo ($vcs) failed:\n".
+                                    "<blockquote>$status</blockquote>");
+                    } elsif ($status) {
+                        $bb->color_line('yellow', "fsck for $repo ($vcs) found issues:\n".
+                                    "<blockquote>$status</blockquote>");
+                    }
+                }
+            } else {
+                $bb->color_line('yellow', "$repo ($vcs) exists, but $vcs seems not installed.\n");
+            }
+        }
+    }
+}
+
+if ($repos_found) {
+    $bb->print("\n$repos_found VCS repositories found.");
+} else {
+    $bb->color_line('green', "No VCS repositories found.");
+}
+
+$bb->send;

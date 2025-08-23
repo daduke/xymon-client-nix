@@ -1,0 +1,34 @@
+#!/usr/bin/perl -w
+
+use strict;
+use IPC::Run qw(run timeout);
+use Hobbit;
+my $bb = new Hobbit ('misc');
+
+my @tests = sort grep { /\/[a-zA-Z0-9_-]+$/ } glob "/etc/xymon/misc.d/*";
+
+foreach my $test (@tests) {
+	next unless -x $test;
+
+	my ($stdin, $stdout, $stderr);
+	run ([$test], \$stdin, \$stdout, \$stderr, timeout(300));
+	my $rc = $? >> 8;
+
+	$test =~ /\/([a-zA-Z0-9_-]+)$/;
+	my $name = $1;
+
+	my $color = ($rc == 0 and not $stderr) ? 'green' :
+		    (($rc == 1 and not $stderr) ? 'yellow' : 'red');
+
+	$bb->color_line($color, $name . ($rc ? " returned $rc" : '') . (($stdout or $stderr) ? ':' : '') ."\n");
+	if ($stdout) {
+		$stdout =~ s/^/   /mg;
+		$bb->print ($stdout);
+	}
+	if ($stderr) {
+		$stderr =~ s/^/   /mg;
+		$bb->print ($stderr);
+	}
+}
+
+$bb->send unless ($bb->{color} eq 'clear');

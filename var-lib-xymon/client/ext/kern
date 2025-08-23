@@ -1,0 +1,130 @@
+#!/usr/bin/perl -w
+
+# Copyright (C) 2005, 2006, 2007, 2008 Peter Palfrader <peter@palfrader.org>
+# Porting to hobbit Copyright (C) 2007 Christoph Berg <myon@debian.org>
+# Copyright (C) 2011-2023 Axel Beckert <abe@debian.org>
+# Copyright (C) 2014 Elmar Heeb <elmar@heebs.ch>
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+# LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+# WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+use strict;
+use English;
+use Hobbit;
+use YAML::Tiny;
+use POSIX qw(uname);
+use Sort::Naturally qw(nsort);
+use File::Slurp qw(read_file);
+
+$ENV{'PATH'} = '/bin:/sbin:/usr/bin:/usr/sbin';
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+my $bb = new Hobbit ('kern');
+
+################### Kernel
+
+my @running_kernel_uname = POSIX::uname();
+my $running_kernel_release = $running_kernel_uname[2];
+my $running_kernel_version = $running_kernel_uname[3];
+
+my ($newest_kernel_image) = reverse nsort glob('/boot/vmlinuz-*');
+
+if ($newest_kernel_image) {
+    $newest_kernel_image =~ /vmlinu[xz]-(.*)$/;
+    my $kernel_image_release = $1;
+
+    my $kernel_image_read_command = "strings '$newest_kernel_image'";
+    if (-x '/usr/bin/dpkg' and `dpkg --print-architecture` =~ /sparc/) {
+        $kernel_image_read_command = "zcat '$newest_kernel_image' | strings";
+    }
+    $kernel_image_read_command .=
+        " | grep -E '^$kernel_image_release|^Linux version '";
+
+    my $fork_successful = open(my $pipe, '-|', $kernel_image_read_command);
+    unless ($fork_successful) {
+        $bb->color_line('yellow',
+                        "Couldn't fork $kernel_image_read_command: $!\n\n");
+    } else {
+        my $kernel_image_version = <$pipe>;
+        chomp($kernel_image_version) if defined $kernel_image_version;
+
+        my $exit_code = close($pipe);
+        unless ($exit_code) {
+            if (!-r $newest_kernel_image) {
+                $bb->color_line('yellow',
+                                "Kernel image $newest_kernel_image unreadable. ".
+                                "Can't check kernel version!\n".
+                                'See comment #3 on '.
+                                '<a href="https://bugs.launchpad.net/bugs/759725"'.
+                                '>https://bugs.launchpad.net/bugs/759725</a> '.
+                                "for details and a permanent workaround.\n\n");
+            } elsif (!-x '/usr/bin/strings') {
+                $bb->color_line('yellow',
+                                '"strings" from package "binutils" not found.'.
+                                " Can't check kernel version!\n\n");
+            } else {
+                $bb->color_line('clear',
+                                "Couldn't find for string '$kernel_image_release' in ".
+                                "$newest_kernel_image. Can't check kernel version, ".
+                                "skipping.\n\n");
+            }
+        } else {
+            if ($kernel_image_version =~ /^(Linux version )?\Q$running_kernel_release\E \(.*\) \Q$running_kernel_version\E/) {
+                $bb->color_line('green',
+                                sprintf("Newest kernel is running: %s, version %s\n\n",
+                                        $running_kernel_release,
+                                        $running_kernel_version));
+
+            } else {
+                $kernel_image_version =~ s/ \(\S*\) /, version /;
+                $kernel_image_version =~ s/^Linux version //;
+                $bb->color_line ('yellow',
+                                 "Machine should be rebooted. Running not the newest installed kernel:\n\n".
+                                 sprintf("  Running kernel:          %s, version %s\n",
+                                         $running_kernel_release,
+                                         $running_kernel_version).
+                                 sprintf("  Newest installed kernel: %s\n\n",
+                                         $kernel_image_version));
+            }
+        }
+    }
+} else {
+    $bb->color_line ('clear', "No kernel found, hence none checked.\n\n");
+}
+
+################### /var/run/reboot-required
+
+if (-f '/var/run/reboot-required') {
+    $bb->color_line('yellow',
+                    'Reboot required according to /var/run/reboot-required.');
+    my $reboot_required_reason = read_file('/var/run/reboot-required');
+    if ($reboot_required_reason) {
+        $bb->print(" Reason:\n\n$reboot_required_reason");
+    }
+    $bb->print("\n\n");
+
+    if (-f '/var/run/reboot-required.pkgs') {
+        $bb->print("Reboot required by these packages:\n\n".
+                   read_file('/var/run/reboot-required.pkgs').
+                   "\n\n");
+    }
+}
+
+$bb->add_color ('clear');
+$bb->send;

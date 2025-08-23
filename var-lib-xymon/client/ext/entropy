@@ -1,0 +1,73 @@
+#!/usr/bin/perl
+
+# A Hobbit client-side module to check the available kernel entropy.
+
+# Copyright (C) 2008 Christoph Berg <myon@debian.org>
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following
+# conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+use warnings;
+use strict;
+use Hobbit;
+use YAML::Tiny;
+
+my $testname = 'entropy';
+my $bb = new Hobbit("$testname");
+my $plugins_config = '/etc/xymon/plugins.yaml';
+
+my $entropy = 0;
+my $loop = 10; # sample this many counts
+my $delay = 2; # sleep 2s before each sample
+my $warning = 200;
+my $critical = 100;
+
+if (-e $plugins_config) {
+    my $config_yaml = YAML::Tiny->read($plugins_config);
+    my $config = $config_yaml->[0]{"$testname"};
+
+    $loop = $config->{'loop'} if ( defined($config->{'loop'}) );
+    $delay = $config->{'delay'} if ( defined($config->{'delay'}) );
+    $warning = $config->{'warning'} if ( defined($config->{'warning'}) );
+    $critical = $config->{'critical'} if ( defined($config->{'critical'}) );
+}
+
+
+for (1 .. $loop) {
+	sleep $delay;
+	open(F, '<', '/proc/sys/kernel/random/entropy_avail') or exit;
+	$entropy += <F>;
+	chomp $entropy;
+	close F;
+}
+$entropy = sprintf "%d", $entropy / $loop;
+
+$bb->print ("Kernel entropy pool\n\n");
+if ($entropy >= $warning) {
+	$bb->color_line ('green', "$entropy bits available - ok\n\n");
+} elsif ($entropy >= $critical) {
+	$bb->color_line ('yellow', "$entropy bits available - low\n\n");
+} else {
+	$bb->color_line ('red', "$entropy bits available - very low\n\n");
+}
+$bb->print ("entropy : $entropy\n");
+
+$bb->send;

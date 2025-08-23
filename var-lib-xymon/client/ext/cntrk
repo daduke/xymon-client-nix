@@ -1,0 +1,95 @@
+#!/usr/bin/perl
+
+# Copyright (C) 2015 Axel Beckert <abe@debian.org>
+#
+# Based on the generic hobbit plugin template by Christoph Berg.
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following
+# conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+use strict;
+use warnings;
+use Hobbit;
+use File::Slurp;
+
+# Configuration, thresholds in percent
+
+my $yellow = 80;
+my $red    = 90;
+my $nf_prefix = '/proc/sys/net/netfilter/nf_conntrack_';
+
+
+# Initialisation
+
+$ENV{'PATH'} = '/bin:/sbin:/usr/bin:/usr/sbin';
+$ENV{'LC_ALL'} = 'C';
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+# Check if connection tracking is there and get the values
+
+sub get_nf_conntrack_value {
+    my $key = shift;
+    my $file = $nf_prefix.$key;
+
+    my $value = undef;
+    if (-r $file) {
+        $value = read_file($file);
+        chomp($value);
+    }
+
+    return $value;
+}
+
+my $max   = get_nf_conntrack_value('max');
+exit 0 unless defined($max);
+
+my $count = get_nf_conntrack_value('count');
+
+unless (defined($count)) {
+    warn "nf_conntrack_max with value, but nf_conntrack_count without. Setting to zero.";
+    $count = 0;
+}
+
+my $bb   = new Hobbit('cntrk');
+my $data = Hobbit::trends();
+
+# Threshold checks and colors
+
+$bb->print("\n");
+
+my $yellow_max = $max * $yellow / 100;
+my $red_max    = $max * $red / 100;
+
+$bb->color_line($count >= $red_max    ? 'red' :
+                $count >= $yellow_max ? 'yellow' :
+                                        'green',
+                sprintf("%i connections tracked of maximal %i (%i%%).\n",
+                        $count, $max, $count*100/$max));
+
+# Data for graphs
+$data->print("[cntrk.rrd]\n");
+$data->print("DS:count:GAUGE:600:U:U $count\n");
+$data->print("DS:max:GAUGE:600:U:U $max\n");
+
+$bb->graph('cntrk');
+
+$bb->send;
+$data->send;

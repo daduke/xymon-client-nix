@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+
+import pyxymon as pymon
+import os
+import subprocess
+import sys
+import re
+import argparse
+import json
+import configparser
+CHECK_NAME = "svcs"
+CHECK_VERSION = 1.0
+CHECK_LIFETIME = 60
+
+
+rules = {
+    "ignore": [
+        {"LoadState": "not-found"},
+        {"LoadState": "masked"},
+        {"LoadState": "disabled"},
+        {"ActiveState": "inactive", "ConditionResult": "no"},
+        {"ActiveState": "activating"},
+        {"LoadState": "loaded", "Result": "success", "TriggeredBy": ".+"},
+        {"LoadState": "loaded", "ActiveState": "inactive", "Result": "success", "Restart": "no"},
+        {"LoadState": "loaded", "ActiveState": "inactive", "Result": "success", "Restart": "on-failure"},  # e.g. thermald done with "unsupported cpu model or platform"
+    ],
+    "warning": [
+        {"LoadState": "loaded", "ActiveState": "inactive"},
+        ],
+    "critical": [],
+    "ok": [
+        { "ActiveState": "active" },
+        { "Result": "success" },
+        ],
+}
+
+parser = argparse.ArgumentParser(prog='svcs', description=
+"""
+Xymon Check Systemd Units
+
+This script checks all fields of "systemctl show". These include
+
+  Id:             nfs-server.service, ...
+  LoadState:      loaded, not-found, ...
+  ActiveState:    active, failed, ...
+  SubState:       dead, ...
+  UnitFileState:  enabled
+  UnitFilePreset: enabled
+
+  also see: "systemctl --state=help"" and "org.freedesktop.systemd1"
+
+The fields are evaluated according to the rules below. They are applied
+in the order "ignore", "critical", "warning", "ok". The first match wins.
+If no rules matches, the unit is marked as "critical".
+Each rule can include multiple attributes, in this case all have to match.
+
+The rules can be extended/overruled with by providing a RULES entry in the
+xymon check configuration. Regexes are allowed on the right hand sides.
+
+Example: (intendation is important)
+[svcs]
+    CMD ...
+    INTERVAL ...
+    RULES {
+        "ignore": [
+          {"Id": "systemd-networkd-wait-online.service"}
+        ]
+      }
+
+Default rules:
+""" + json.dumps(rules, indent=2), formatter_class=argparse.RawTextHelpFormatter)
+parser.add_argument("--systemctl-failed-all", help="Turn red if 'systemctl --failed --all' reports something", action="store_true", default=False)
+parser.add_argument("--no-default-rules", metavar="TYPE", nargs="+", choices=rules.keys(), help="Do not load default rules of given TYPE: " + ", ".join(rules.keys()), default=[])
+
+args = parser.parse_args()
+
+def check_unit(unit):
+    return_codes= {"ignore": pymon.STATUS_OK, "critical": pymon.STATUS_CRITICAL, "warning": pymon.STATUS_WARNING, "ok": pymon.STATUS_OK}
+    # iterate over all rule types (in this order):
+    for rule_type in ["ignore", "critical", "warning", "ok"]:
+        # iterate over all rules of a given type:
+        for rule in rules.get(rule_type,[]):
+            # check if a rule matches a unit, i.e. check if all (key, value) pairs
+            # of the rule are also contained int the unit dictionary
+            # values are compared via re.match (if unit[key] exists)
+            if all(key in unit.keys() and bool(re.match(val, unit[key])) for key,val in rule.items()):
+                return return_codes[rule_type]
+    return return_codes["critical"]
+
+
+def get_table(units):
+    """Returns a html table of given units"""
+    columns = {"color": "", "Id": "UNIT", "LoadState": "LOAD", "ActiveState": "ACTIVE", "SubState": "STATE"}
+
+    table = ["<table>"]
+    table.append("<tr><td><b>" + "</b></td><td><b>".join(columns.values()) + "</b></td></tr>")
+    for unit in units:
+        # we need a whitespace to make xymon mouseover happy
+        table.append("<tr><td>" + " </td><td>".join([unit.get(k, "") for k in columns.keys()]) + "</td></tr>")
+    table.append("</table>")
+    return "".join(table)
+
+
+def main():
+    xymon = pymon.XymonClient(CHECK_NAME)
+    xymon.lifetime = CHECK_LIFETIME
+    xymon.color = pymon.STATUS_OK
+    xymon.footer("svcs", CHECK_VERSION)
+
+    global rules
+    output_table = []
+
+    config = configparser.ConfigParser(delimiters=(' '))
+    config.read("/etc/xymon/clientlaunch.d/svcs.cfg")
+    extra_rules = config.get("svcs","rules", fallback=None)
+    for t in args.no_default_rules:
+        rules[t] = []
+    if extra_rules:
+        extra_rules = json.loads(extra_rules)
+        for rule_type in ["ignore", "critical", "warning", "ok"]:
+            rules[rule_type] += extra_rules.get(rule_type, [])
+    proc = subprocess.run(["systemctl", "show","--all", "*"], capture_output=True, encoding="utf-8")
+
+    list_units=[]
+    # All properties are reported as Key=Value lines, units are separated by an empty line
+    for section in proc.stdout.split("\n\n"):  # for each "unit section"
+        d ={}
+        for line in section.splitlines():  # for each "attribute line"
+            f = line.split("=")
+            d[f[0]] = f[1]
+        list_units.append(d)
+
+    for unit in list_units:
+        status = check_unit(unit)
+        xymon.color = status
+        if status in [pymon.STATUS_WARNING, pymon.STATUS_CRITICAL]:
+            output_table.append({"color": status} | unit)
+
+    if output_table:
+        table = get_table(output_table)
+    else:
+        table = f"All {len(list_units)} units are as expected!"
+    xymon.section("Units", table)
+
+
+    proc = subprocess.run(["systemctl", "--all", "--failed", "--quiet", "--plain"], capture_output=True, encoding="utf-8")
+    if proc.stdout and "0 loaded units listed." not in proc.stdout.splitlines():
+        if(args.systemctl_failed_all):
+            xymon.color = pymon.STATUS_CRITICAL
+        xymon.section("systemctl --failed --all", proc.stdout)
+
+    xymon.send()
+
+
+if __name__ == "__main__":
+    main()
+    sys.exit(0)

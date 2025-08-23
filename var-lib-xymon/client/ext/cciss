@@ -1,0 +1,46 @@
+#!/usr/bin/perl -w
+
+# Hobbit/Xymon check for hardware RAIDs in HP ProLiant servers
+#
+# Needs the packages sudo and cciss-vol-status installed.
+#
+# Copyright (C) 2014 Axel Beckert <abe@debian.org>
+#
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation; either version 2 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+
+use strict;
+use Hobbit;
+
+my $bb = new Hobbit ('cciss');
+
+if (! -x '/usr/bin/cciss_vol_status') {
+    $bb->color_line ('yellow', "cciss_vol_status not found. Please install the cciss-vol-status package.\n");
+} elsif (! -x '/usr/bin/sudo') {
+    $bb->color_line ('yellow', "sudo not found. Please install the sudo package.\n");
+} else {
+    open(CCISS, '-|', '/usr/bin/sudo /usr/bin/cciss_vol_status -u -s /dev/cciss/c*d0 /dev/sg* 2>&1')
+        or die "Can't exec sudo cciss_vol_status: $!";
+
+    while (<CCISS>) {
+        my $color = 'clear';
+        $color = 'green' if /status: OK/;
+        $color = 'yellow' if /interim recovery mode|recovery operation|recovering|overheated|Temperature problem/;
+        $color = 'red' if /Wrong physical drive was replaced|A physical drive is not properly connected/;
+        $color = 'red' if /failed|overheating/i;
+        $bb->color_line ($color, $_);
+    }
+
+    my $rc = close(CCISS);
+    $bb->color_line ('yellow', "Exit code of cciss_vol_status was not equal zero: $?\n")
+        unless $rc;
+}
+
+$bb->send;

@@ -1,0 +1,4 @@
+client nixos-testing.daduke.org.linux linux
+[clientversion]
+
+[clock]

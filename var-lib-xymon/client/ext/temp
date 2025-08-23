@@ -1,0 +1,440 @@
+#!/usr/bin/perl
+
+# Copyright (C) 2012 Christoph Berg <myon@debian.org>
+# Copyright (C) 2015-2023 Axel Beckert <abe@debian.org>
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following
+# conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+use strict;
+use warnings;
+use Module::Load::Conditional qw(can_load); # Needs to be loaded before Hobbit
+use Hobbit;
+use Carp;
+use File::Which;
+use YAML::Tiny;
+
+my $bb = new Hobbit('temp');
+
+#############################################################################
+# Configuration of some basic limits if no limits are given by the hardware #
+#############################################################################
+
+my @CONFIG = qw(/etc/xymon/temp.yaml /etc/xymon/temp.local.yaml);
+
+# Limits in degrees Celsius
+my %yellow = (
+    disk => 47,
+    cpu  => 80,
+    gpu  => 80,
+    ram  => 80,
+);
+my %red = (
+    disk => 55,
+    cpu  => 90,
+    gpu  => 90,
+    ram  => 90,
+);
+
+my @ignores;
+foreach my $filename (@CONFIG) {
+    if ( -f $filename ) {
+        my $temp_cfg = YAML::Tiny->read($filename)->[0];
+        foreach my $key (keys %$temp_cfg) {
+            my $value = $temp_cfg->{$key};
+                if ($key eq 'ignore') {
+                    foreach my $val (@$value) {
+                        push @ignores, $val;
+                    }
+                } elsif (ref($value) eq 'HASH') {
+                my $hash = $value;
+                if (exists $hash->{yellow}) {
+                    $yellow{$key} = 0 + $hash->{yellow};
+                }
+                if (exists $hash->{red}) {
+                    $red{$key} = 0 + $hash->{red};
+                }
+            } elsif (ref($value) eq 'ARRAY') {
+                my $array = $value;
+                if (exists $array->[0]) {
+                    $yellow{$key} = 0 + $array->[0];
+                }
+                if (exists $array->[1]) {
+                    $red{$key} = 0 + $array->[1];
+                }
+            } else {
+                if (defined $value) {
+                    $yellow{$key} = $red{$key} = 0 + $value;
+                }
+            }
+        }
+    }
+}
+
+#############################################################################
+# End of Configuration                                                      #
+#############################################################################
+my $trends = Hobbit::trends;
+
+my $sudo     = which('sudo');
+my $nvsmi    = which('nvidia-smi');
+my $smartctl = which('smartctl');
+my $lsmod    = which('lsmod');
+
+# find /sys -iname '*therm*' -o -iname  '*tz*' -o -iname '*temp*' -ls
+my @zones = sort glob "/sys/class/thermal/*/temp";
+my @hwmontemp = sort(glob('/sys/devices/platform/*/hwmon/hwmon*/temp*_input'),
+                     glob('/sys/devices/platform/*/temp*_input'),
+                     glob('/sys/devices/pci*/*/hwmon/hwmon*/temp*_input'),
+                     glob('/sys/devices/pci*/*/temp*_input'),
+                     glob('/sys/class/block/[hs]d[a-z]{,[a-z]}/device/hwmon/hwmon*/temp*_input'),
+                     glob('/sys/class/block/nvme[0-9]{,[0-9]}n[0-9]/device/hwmon*/temp*_input'));
+my @areca_raids = sort(`grep -Fls Areca /sys/class/scsi_generic/sg*/device/vendor`);
+my $nvsmi_qx_output = '';
+if ($nvsmi and -x $nvsmi and -e '/dev/nvidiactl') {
+    my $cmd = "$nvsmi -q -x";
+    if (-e '/dev/nvidiactl' and !-w '/dev/nvidiactl') {
+        if (sudo_available(
+                'NVidia GPU temperature check with /dev/nvidiactl not being writable for xymon')) {
+            $cmd = "$sudo $cmd";
+        }
+    }
+    $nvsmi_qx_output = `$cmd 2>&1`;
+}
+
+$bb->add_color ('clear');
+
+# Sanity checks around thermal zones and drivetemp driver
+my $drivetemp = '';
+if (-x $lsmod) {
+    $drivetemp = `$lsmod | grep -E '^drivetemp'`;
+} elsif (-r '/proc/modules') {
+    $drivetemp = `grep -E '^drivetemp' /proc/modules`;
+}
+
+if ($drivetemp =~ /^drivetemp\b/m) {
+    unless (@zones or
+            @hwmontemp or
+            (@areca_raids and $smartctl and -x $smartctl) or
+            $nvsmi_qx_output) {
+        $bb->color_line(
+            'clear',
+            'No hardware temperature monitors or thermal zones found.');
+    }
+} else {
+    $bb->color_line('yellow',
+                    'Driver "drivetemp" not loaded. '.
+                    "Cannot check for harddrive temperatures.\n");
+    $bb->print('Either run "modprobe drivetemp" as root or add "drivetemp"'.
+               "\nto /etc/modules or /etc/modules-load.d/drivetemp.conf\n\n");
+}
+
+# Old style zones
+if (@zones) {
+    $bb->add_color ('green');
+
+    foreach my $zone (@zones) {
+        my $temp = read_one_chomped_line_from_file($zone) / 1000.0;
+        $zone =~ m!.*/(.+)/!;
+        my $name = $1;
+        $bb->color_line(color_by_temp_and_device($temp, 'cpu'),
+                        sprintf("%s: %.1f &deg;C\n", $name, $temp));
+
+        $trends->print ("[$bb->{test},$name.rrd]\n");
+        $trends->sprintf ("DS:temp:GAUGE:600:U:U %f\n", $temp);
+    }
+}
+
+# New style zones (coretemp + drivetemp)
+if (@hwmontemp) {
+    $bb->add_color ('green');
+
+    foreach my $zone (@hwmontemp) {
+        my $name_file = $zone; $name_file =~ s/input/label/;
+        my $min_file  = $zone; $min_file  =~ s/input/min/;
+        my $mid_file  = $zone; $mid_file  =~ s/input/mid/;
+        my $max_file  = $zone; $max_file  =~ s/input/max/;
+        my $crit_file = $zone; $crit_file =~ s/input/crit/;
+
+        my $temp = read_one_chomped_line_from_file($zone);
+        next unless defined($temp);
+
+        $temp /= 1000.0;
+
+        my ($red, $yellow);
+        if (-r $crit_file and -r $max_file) {
+            $red     = read_one_chomped_line_from_file($crit_file);
+            $yellow  = read_one_chomped_line_from_file($max_file);
+        } elsif (-r $max_file and -r $mid_file) {
+            $red     = read_one_chomped_line_from_file($max_file);
+            $yellow  = read_one_chomped_line_from_file($mid_file);
+        } elsif (-r $max_file and -r $min_file) {
+            $red     = read_one_chomped_line_from_file($max_file);
+            $yellow  = read_one_chomped_line_from_file($min_file);
+        } elsif (-r $max_file) {
+            $red = $yellow = read_one_chomped_line_from_file($max_file);
+        } elsif (-r $crit_file) {
+            $red = $yellow = read_one_chomped_line_from_file($crit_file);
+        }
+        $red    /= 1000.0 if defined($red);
+        $yellow /= 1000.0 if defined($yellow);
+
+        my $color;
+        my $name = $zone;
+        my $blockname;
+        my $device = 'cpu';
+        if (-r $name_file) {
+            $name = read_one_chomped_line_from_file($name_file);
+            if ($name =~ /DIMM/) {
+                $device = 'ram';
+            }
+        } elsif ($zone =~ /\/block\//) {
+            # no label file, extract dev name from path
+            ($blockname) = ($zone =~ /\/block\/([^\/]+)/);
+            $name = "/dev/$blockname";
+            $device = 'disk';
+            # workaround for zero thresholds on some disks
+            if (defined($red) and $red == 0) {
+                $red = undef;
+            }
+            if (defined($yellow) and $yellow == 0) {
+                $yellow = undef;
+            }
+        }
+        $color =
+            color_calc_with_device_fallback($temp, $yellow, $red, $device);
+
+        if ($zone ne $name) {
+            $color = 'clear' if (grep(/^$name$/, @ignores));
+            $bb->color_line($color,
+                            sprintf("%s: %.1f &deg;C (%s)\n",
+                                    $name, $temp, $zone));
+        } else {
+            $bb->color_line($color,
+                            sprintf("%s: %.1f &deg;C\n",
+                                    $zone, $temp));
+        }
+
+        $zone =~ s:^/sys/::;
+        $zone =~ s/\W/_/g;
+        # keep compatibility with hddtemp
+        $zone = $blockname if ($blockname);
+
+        $trends->print ("[$bb->{test},$zone.rrd]\n");
+        $trends->sprintf ("DS:temp:GAUGE:600:U:U %f\n", $temp);
+    }
+}
+
+# Disks behind Areca RAID Controllers
+if (@areca_raids and $smartctl and -x $smartctl and
+    sudo_available('Areca RAID disks temperature check with smartctl')) {
+
+    chomp(@areca_raids);
+    foreach my $areca (@areca_raids) {
+        $areca =~ s:/vendor$::;
+        next if read_one_chomped_line_from_file("$areca/model")
+            !~ /RAID controller/i;
+        $areca =~ s:/sys/class/scsi_generic/(sg\d+)/device:/dev/$1:;
+
+        my $firmware_issues;
+        foreach my $disk (1..24) {
+            # First capture all output
+            my @smartctl_output =
+                `sudo smartctl -A -d areca,$disk $areca`;
+            chomp(@smartctl_output);
+
+            # Check for "outdated firmware" messages
+            my @firmware_issue = grep { /firmware/i } @smartctl_output;
+            if (@firmware_issue) {
+                $firmware_issues = join(" ",@firmware_issue);
+            }
+
+            # Skip the remaining logic if no device was found
+            next if grep { /No such device/i } @smartctl_output;
+
+            # Pick out the temperature line
+            my @smartctl_temp =
+                grep { /Temperature_Celsius/ } @smartctl_output;
+            next unless @smartctl_temp;
+
+            # Warn if we found more than one line (unexpected, unhandled so far)
+            carp "Multiple temperature lines in smartctl output for disk $disk, $areca"
+                if $#smartctl_temp > 0;
+            my $smartctl_temp = join(" ", @smartctl_temp);
+
+            # Try to parse that line
+            $smartctl_temp =~
+                s/^\d+\s+(Temperature.Celsius)[\s0-9x]*Old_age\s+Always\s+-\s+((\d+)(\s+.Min\/Max\s+(\d+)\/(\d+).)?)\s*$/$1 $2/;
+            my $temp = $3;
+
+            # Bail out if we can't parse it.
+            if (!defined($3)) {
+                carp "Don't know how to parse Areca smartctl output: '$smartctl_temp'";
+                next;
+            }
+
+            # We've found some temperature
+            $bb->color_line(color_by_temp_and_device($temp, 'disk'),
+                            "Areca RAID Controller $areca, Disk $disk: $smartctl_temp\n");
+
+            my $shortareca = $areca; $shortareca =~ s:^/dev/::;
+            $trends->print ("[$bb->{test},areca_${shortareca}_disk${disk}.rrd]\n");
+            $trends->sprintf ("DS:temp:GAUGE:600:U:U %f\n", $temp);
+        }
+
+        if ($firmware_issues) {
+            $bb->color_line('clear',
+                            "Areca RAID Controller $areca: $firmware_issues\n");
+        }
+
+    }
+}
+
+# NVidia GPUs
+if ($nvsmi_qx_output) {
+    my %gpu;
+
+    # Extracting data from XML needs XML::Twig
+    if (can_load( modules => { 'XML::Twig' => 0 })) {
+        my $t = XML::Twig->new();
+        my $twig_object = $t->safe_parse($nvsmi_qx_output);
+
+        # safe_parse returns 0 on parse error and sets $@.
+        if (!$twig_object) {
+            # Remove unnecessary contents from error message
+            $@ =~ s/^\n+//s;
+            $@ =~ s:\n at \S+/temp line \d+\.\n*$::s;
+
+            $bb->color_line('clear',
+                            "An error happened while parsing $nvsmi output: $@\n\n".
+                            "Full output:\n\n$nvsmi_qx_output");
+        } else {
+            foreach my $gpu ($t->root->children('gpu')) {
+                my $id = $gpu->id;
+                $gpu{$id} = {};
+                my $temp = $gpu->first_child('temperature');
+                foreach my $gpu_temp ($temp->children()) {
+                    $gpu{$id}{$gpu_temp->name} = $gpu_temp->text_only;
+                }
+            }
+
+            foreach my $gpu_id (sort keys %gpu) {
+                my $gpu = $gpu{$gpu_id};
+                my $temp = '';
+                my $color = 'clear';
+
+                my $gpu_temp = value_if_key_exists_defined_not_na($gpu, 'gpu_temp');
+                if ($gpu_temp) {
+                    $bb->add_color ('green');
+                    my ($temp, $unit) = split(/\s+/, $gpu_temp);
+
+                    # gpu_temp_slow_threshold and gpu_temp_max_threshold
+                    # are untested as I've only access to machines which
+                    # return the value "N/A" for these fields. -- Axel
+                    my ($red, $yellow);
+                    $yellow =
+                        value_if_key_exists_defined_not_na($gpu, 'gpu_temp_slow_threshold');
+                    $red =
+                        value_if_key_exists_defined_not_na($gpu, 'gpu_temp_max_threshold');
+
+                    $color =
+                        color_calc_with_device_fallback($temp, $yellow, $red, 'gpu');
+                    $bb->color_line($color,
+                                    sprintf("NVidia GPU %s: %.1f &deg;%s\n",
+                                            $gpu_id, $temp, $unit));
+
+                    $trends->print ("[$bb->{test},GPU_$gpu_id.rrd]\n");
+                    $trends->sprintf ("DS:temp:GAUGE:600:U:U %f\n", $temp);
+                }
+            }
+        }
+    } else {
+        # XML::Twig is not installed
+        $bb->color_line('yellow',
+                        'There is an NVidia card in the machine and '.
+                        'nvidia-smi is installed, but to parse its output '.
+                        "libxml-twig-perl is also required.\n");
+    }
+}
+
+$bb->send;
+$trends->send;
+
+####################
+# Helper Functions #
+####################
+
+sub read_one_chomped_line_from_file {
+    my $file = shift;
+    open(my $F, '<', $file) or carp "Couldn't open $file: $!";
+    my $line = <$F>;
+    close $F;
+    chomp $line if defined($line);
+    return $line;
+}
+
+sub color_calc {
+    my ($temp, $yellow, $red) = @_;
+    my $color =
+        $temp >= $red ? 'red' :
+        $temp >= $yellow ? 'yellow' :
+        'green';
+    return $color;
+}
+
+sub color_by_temp_and_device {
+    my ($temp, $device) = @_;
+    return color_calc($temp, $yellow{$device}, $red{$device});
+}
+
+sub color_calc_with_device_fallback {
+    my ($temp, $yellow, $red, $device) = @_;
+    $red    = $red{$device}    unless defined $red;
+    $yellow = $yellow{$device} unless defined $yellow;
+    return color_calc($temp, $yellow, $red);
+}
+
+sub value_if_key_exists_defined_not_na {
+    my ($hashref, $key) = @_;
+
+    if (exists $hashref->{$key} and
+        defined($hashref->{$key}) and
+        $hashref->{$key} ne 'N/A') {
+
+        return $hashref->{$key};
+    } else {
+        return undef;
+    }
+}
+
+sub sudo_available {
+    my $test = shift;
+
+    if (-x $sudo) {
+        return 1;
+    } else {
+        $bb->color_line('yellow',
+                        "The $test requires sudo to be installed. ".
+                        "The approriate configuration is part of the ".
+                        "hobbit-plugins package and at /etc/sudoers.d/xymon.");
+        return 0;
+    }
+}

@@ -1,0 +1,371 @@
+#!/usr/bin/perl
+
+# A Hobbit client-side module to check the local network interface
+# states (e.g. "needs to be up", "needs to be in promiscuous mode",
+# etc.).
+#
+# Copyright (C) 2018-2022 Axel Beckert <abe@debian.org>
+#
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation; either version 2 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+
+use strict;
+use warnings;
+use 5.010;
+use Hobbit;
+use YAML::Tiny;
+use Sys::Hostname;
+use File::Which;
+use File::Slurp qw(read_file);
+use IPC::Run qw(run);
+use Carp;
+
+my $interval = 10; # How long to measure packet amounts in seconds
+my @config_file_locations = qw(
+    /etc/xymon/net.yaml
+    /etc/xymon-client/net.yaml
+    );
+my %netstat_field = (
+    'RX-OK'  => 2,
+    'RX-ERR' => 3,
+    'TX-OK'  => 10,
+    'TX-ERR' => 11,
+    );
+
+# Only do something if a config file is present
+my $config_file;
+foreach my $location (@config_file_locations) {
+    if (-e $location) {
+        $config_file = $location;
+        last;
+    }
+}
+exit 0 unless defined $config_file and -e $config_file;
+
+my $bb = new Hobbit('net');
+my $hostname = hostname;
+my $config;
+
+# Try to parse the YAML configuration and throw a warning if the
+# YAML::Tiny parser fails. Needs to copy with different generations of
+# YAML::Tiny which have different behaviour on errors.
+my $config_yaml = YAML::Tiny->read($config_file);
+unless (defined $config_yaml) {
+    $bb->color_line( 'red',
+                     "YAML::Tiny couldn't parse $config_file.\n".
+                     ( defined($YAML::Tiny::errstr) ?
+                       $YAML::Tiny::errstr."\n" :
+                       '' ));
+    $bb->send;
+    exit 0;
+};
+
+# Look for my hostname in the configuration file and exit if it's not
+# in there.
+$config = $config_yaml->[0]{$hostname} if ( exists($config_yaml->[0]) and
+                                    exists($config_yaml->[0]{$hostname}) and
+                                    defined($config_yaml->[0]{$hostname}) );
+exit 0 unless $config;
+
+my %if_cache;
+my %special_case = (
+    'Full' => 'Duplex: Full',
+    'Half' => 'Duplex: Half',
+    'TP' => 'Port: Twisted Pair',
+    'Twisted Pair' => 'Port: Twisted Pair',
+    'FIBRE' => 'Port: FIBRE',
+    'MTU' => 'mtu',
+    );
+
+# Check if at least one of the two binaries is present
+my $ip_bin       = which 'ip';
+my $ifconfig_bin = which 'ifconfig';
+my $ethtool_bin  = which 'ethtool';
+if ($ip_bin or $ifconfig_bin) {
+    my @interfaces = ();
+    if (ref($config) eq 'ARRAY') {
+        @interfaces = @$config;
+        foreach my $interface (@interfaces) {
+            check_if_state($interface, 'UP');
+        }
+    } elsif (ref($config) eq 'HASH') {
+        @interfaces = sort keys %$config;
+        foreach my $interface (@interfaces) {
+            #if_exists($interface);
+            if (ref($config->{$interface}) eq 'ARRAY') {
+                my @states = @{$config->{$interface}};
+                foreach my $state (@states) {
+                    my $color = 'yellow';
+                    if (ref($state) eq 'HASH') {
+                        # TODO: Support more than one key value pair per line
+                        my $old_state = $state;
+                        $state = (keys   %$old_state)[0];
+                        $color = (values %$old_state)[0];
+                        #use Data::Dumper;
+                        #die Dumper [$old_state, $state, $color];
+                    }
+                    check_if_state($interface, $state, $color);
+                }
+            } elsif (ref($config->{$interface}) eq 'HASH') {
+                my $if_state = $config->{$interface};
+                my @states = sort keys %$if_state;
+                foreach my $state (@states) {
+                    check_if_state($interface, $state, $if_state->{$state});
+                }
+            } else {
+                $bb->color_line(
+                    'yellow',
+                    "$hostname -> $interface is not a YAML list or hash, skipping.\n"
+                    );
+            }
+        }
+    }
+} else {
+# Neither ifconfig nor ip is found?!? Strange installation, that.
+    $bb->color_line(
+        'red',
+        "$config_file exists, but neither ip nor ifconfig can be found in $ENV{PATH}.\n"
+        );
+}
+
+$bb->send;
+
+###
+### Functions
+###
+
+sub parse_proc_net_dev {
+    my $contents = shift;
+
+    my $matrix = [];
+    foreach my $line (split(/\n/, $contents)) {
+        # Ignore headers
+        next unless $line =~ /:/;
+
+        push(@$matrix, [ split(' ', $line) ]);
+    }
+    return $matrix;
+}
+
+sub proc_net_dev_stats {
+    my $interface = shift;
+    my ($stdout, $stderr) = ('', '');
+
+    # Capture /proc/net/dev twice with $interval seconds in between
+    my $first_read = read_file('/proc/net/dev');
+    if (!defined($first_read)) {
+        $bb->color_line( 'yellow',
+                         "Couldn't read /proc/net/dev initially!");
+        return ($stdout, $stderr);
+    }
+    sleep($interval);
+    my $second_read = read_file('/proc/net/dev');
+    if (!defined($second_read)) {
+        $bb->color_line( 'yellow',
+                         "Couldn't read /proc/net/dev for a second time!");
+        return ($stdout, $stderr);
+    }
+
+    # Parse them into an array of arrays
+    my $first_matrix  = parse_proc_net_dev($first_read);
+    my $second_matrix = parse_proc_net_dev($second_read);
+    my $result_matrix = [];
+
+    # Then calculate the difference between all numerical values
+    for (my $i = 0; $i < @$first_matrix; $i++) {
+        $result_matrix->[$i] = [];
+        for (my $j = 0; $j < @{$first_matrix->[$i]}; $j++) {
+            my $a = $first_matrix->[$i][$j];
+            my $b = $second_matrix->[$i][$j];
+
+            if ($a =~ /^\d+$/ and $b =~ /^\d+$/) {
+                $result_matrix->[$i][$j] = ($b - $a)/$interval;
+            } elsif ($a eq $b) {
+                $result_matrix->[$i][$j] = $a;
+            } else {
+                $bb->color_line( 'yellow',
+                                 'Inconsistency found in /proc/net/dev: '.
+                                 "'$a' not equal '$b', but both are not a ".
+                                 "number either.");
+            }
+        }
+    }
+
+    foreach my $line (@$result_matrix) {
+        my $line_interface = $line->[0];
+        $line_interface =~ s/:$//;
+        my $if_stdout = '';
+        foreach my $type (sort keys %netstat_field) {
+            $if_stdout .=
+                $type .
+                ': ' .
+                $line->[$netstat_field{$type}] .
+                "\n";
+        }
+        $if_cache{"netstat+$line_interface"} =
+            [ $if_stdout, $stderr, 'netstat', $line_interface ];
+        $stdout .= $if_stdout;
+        }
+    $if_cache{"netstat"} =
+        [ $stdout, $stderr, 'netstat' ];
+
+    return @{$if_cache{"netstat+$interface"}};
+}
+
+sub check_if_state {
+    my ($interface, $state, $color) = @_;
+    my ($stdin, $stdout, $stderr, @cmd, $exitcode);
+
+    # Special casing
+    if (exists $special_case{$state}) {
+        $state = $special_case{$state};
+    } elsif ($state eq 'DOWN' and not $ip_bin) {
+        $state = 'not UP';
+    }
+
+    # Generic special cases (sic!)
+    $state =~ s{ (\d+) baseT $ }{Speed: ${1}Mb/s}x;
+    $state =~ s{ ^ \d+ Mb/s $ }{Speed: $&}x;
+
+
+    # Some checks need ethtool
+    if ($state =~ /Duplex:|Speed:|Auto-negotiation:|Port:|Link detected:/) {
+        if (exists $if_cache{"ethtool+$interface"}) {
+            ($stdout, $stderr, @cmd) =
+                (@{$if_cache{"ethtool+$interface"}}, '(cached)');
+            return 0 if (defined($stderr) and
+                         $stderr =~ /No such device/);
+        } else {
+            if ($ethtool_bin) {
+                @cmd = ('ethtool', $interface);
+            } else {
+                $bb->color_line(
+                    'yellow',
+                    "State '$state' (on '$interface') can only be queried ".
+                    "with ethtool, but ethtool seems not available.\n");
+            }
+            run(\@cmd, \$stdin, \$stdout, \$stderr);
+            $exitcode = $? >> 8;
+
+            $if_cache{"ethtool+$interface"} = [ $stdout, $stderr, @cmd ];
+        }
+
+    # Checks against /proc/net/dev (aka netstat without calling a program)
+    } elsif ($state =~ /^[TR]X-(OK|ERR)[:<>=\s]/) {
+        if (exists $if_cache{"netstat+$interface"}) {
+            ($stdout, $stderr, @cmd) =
+                (@{$if_cache{"netstat+$interface"}}, '(cached)');
+        } else {
+            if (-r '/proc/net/dev') {
+                ($stdout, $stderr) = &proc_net_dev_stats($interface);
+            } else {
+                $bb->color_line(
+                    'yellow',
+                    "/proc/net/dev either does not exist or is not readable.\n");
+            }
+        }
+
+    } else {
+    # States being able to read with ip or ifconfig
+        if (exists $if_cache{$interface}) {
+            ($stdout, $stderr, @cmd) =
+                (@{$if_cache{$interface}}, '(cached)');
+            return 0 if (defined($stderr) and
+                         $stderr =~ /Cannot find device|Device not found/);
+        } else {
+            if ($ip_bin) {
+                # Safeguard because we have to use "sh -c ..."
+                croak "Bad interface name '$interface'"
+                    if $interface !~ /^[-_a-zA-Z0-9]*$/;
+                @cmd = ('sh', '-c',
+                        "ip link show dev $interface && ip address show dev $interface");
+            } elsif ($ifconfig_bin) {
+                @cmd = ('ifconfig', $interface);
+            } else {
+                croak 'Assertion failed: ip or ifconfig present';
+            }
+            run(\@cmd, \$stdin, \$stdout, \$stderr);
+            $exitcode = $? >> 8;
+
+            $if_cache{$interface} = [ $stdout, $stderr, @cmd ];
+        }
+    }
+
+    if (defined($stderr) and $stderr ne '') {
+        if ($stderr =~ /Cannot find device|Device not found|No such device/) {
+            $bb->color_line(
+                'yellow',
+                "Interface '$interface' configured, but not found. Skipping.\n");
+            return 0;
+        }
+
+        # Ignore all "Operation not permitted" warnings as long as we
+        # get all the information we wanted.
+        unless ($stderr =~ /Operation not permitted/) {
+            $bb->color_line(
+                'yellow',
+                "Calling '".join(' ', @cmd)."' caused a warning: $stderr");
+        }
+    }
+
+    if ($exitcode) {
+        $bb->color_line(
+            'yellow',
+            "Querying $interface exited with $exitcode.\n");
+    }
+
+    if (defined($stdout) and $stdout ne '') {
+        if ($state =~ /^not\s(.*)$/) {
+            $state = $1;
+            if ($stdout =~ /\b\Q$state\E\b/) {
+                $bb->color_line($color || 'yellow',
+                                "$interface is $state (but shouldn't)\n");
+            } else {
+                $bb->color_line('green',
+                                "$interface isn't $state\n");
+            }
+        } elsif ($state =~ / ^ ([^<>=]*?) \s* ( [<>=] | [<>=]= ) \s* ([^<>=]*?) $ /x) {
+            my ($key, $comparison, $threshold) = ($1, $2, $3);
+
+            $key =~ s/:$//;
+            if ($stdout =~ / \b \Q$key\E :? \s* ( [-+]? \d+(?:\.\d+)? ) \b /x) {
+                my $value = $1;
+                $comparison = '==' if $comparison eq '=';
+
+                if (eval('$value '.$comparison.' '.$threshold)) {
+                    $bb->color_line('green',
+                                    "$key on $interface ($value) is $comparison $threshold\n");
+                } else {
+                    $bb->color_line($color || 'yellow',
+                                    "$key on $interface ($value) is NOT $comparison $threshold\n");
+                }
+            } else {
+                $bb->color_line($color || 'yellow',
+                                "Can't find '$key' for $interface to check its value\n$stdout\n\n");
+            }
+        } else {
+            if ($stdout !~ /\b\Q$state\E\b/) {
+                $bb->color_line($color || 'yellow',
+                                "$interface isn't $state (but should)\n");
+            } else {
+                $bb->color_line('green',
+                                "$interface is $state\n");
+            }
+        }
+    } else {
+        $bb->color_line(
+            'yellow',
+            "Can't check $state on $interface: Querying $interface resulted in no output.\n");
+    }
+}

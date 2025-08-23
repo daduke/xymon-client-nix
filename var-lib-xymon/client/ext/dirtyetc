@@ -1,0 +1,157 @@
+#!/usr/bin/perl -w
+
+# Copyright (C) 2010-2012 Axel Beckert <abe@debian.org>
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following
+# conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+my $ext_etc_config = "/etc/xymon";
+use strict;
+use Hobbit qw(file_to_list_of_regexps);
+
+my $dirty_etc_ok_file = $ext_etc_config."/dirty_etc_ok";
+my $dphys_config_list = "/etc/dphys-config.list";
+my @dirty_etc_ok = file_to_list_of_regexps($dirty_etc_ok_file);
+my @dphys_config_ok = ();
+
+my $DEBSUMS = '/usr/bin/debsums';
+my $SUDO = '/usr/bin/sudo';
+
+$ENV{'PATH'} = '/bin:/sbin:/usr/bin:/usr/sbin';
+$ENV{'LC_ALL'} = 'C';
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+my $bb = new Hobbit('dirtyetc');
+
+###
+### Checks for sudo and debsums
+###
+if (!-x $SUDO) {
+    $bb->color_line ('yellow',
+"$SUDO not found or not executable.
+
+This dirtyetc check should run debsums with root rights. See the file
+/etc/sudoers.d/xymon for how debsums would be run with root rights
+via sudo.
+
+");
+
+    $SUDO = '';
+}
+
+if (!-x $DEBSUMS) {
+    $bb->color_line ('red',
+"$DEBSUMS not found or not executable.
+
+This dirtyetc plugin has been enabled, but debsums seems not
+installed. This plugin depends on debsums.
+
+");
+
+    $bb->send();
+    exit 0;
+}
+
+###
+### Parse dphys-config.list
+###
+
+if (-e $dphys_config_list) {
+    if (!-r $dphys_config_list) {
+	$bb->color_line('yellow', "$dphys_config_list exists, but is not readable\n");
+    } else {
+	open(my $dpc_fh, '<', $dphys_config_list)
+	    or croak("Assertion: $dphys_config_list readable but I still can't open it? WTF!");
+	while (my $dpc_line = <$dpc_fh>) {
+	    chomp($dpc_line);
+	    # Ignore blank lines, comment lines and files which are to
+	    # be deleted by dphys-config
+	    next if $dpc_line =~ /^#|^\s*$|^-:/;
+
+	    my ($filename, $destination, $trigger) = split(/:/, $dpc_line);
+	    if (-d $destination) {
+		if ($destination =~ m(/$)) {
+		    push(@dphys_config_ok, qr(^$destination$filename$));
+		} else {
+		    push(@dphys_config_ok, qr(^$destination/$filename$));
+		}
+	    } elsif (-f $destination) {
+		push(@dphys_config_ok, qr(^$destination$));
+	    } else {
+		# We can ignore non-existent files, can we?
+	    }
+	}
+    }
+}
+
+###
+### Call debsums
+###
+
+my $command = "$DEBSUMS -ec 2>&1";
+open(my $debsums_fh, '-|', "$SUDO $command") or die "Can't execute $SUDO $command";
+my @changed_conffiles = <$debsums_fh>;
+close($debsums_fh);
+chomp(@changed_conffiles);
+
+my (@ok, @ok_dpc, @bad, @bad_config);
+
+foreach my $changed_conffile (@changed_conffiles) {
+    # Check if that's ok
+    if ($changed_conffile =~ /Permission denied/) {
+	push(@bad_config, $changed_conffile);
+    } elsif (grep { $changed_conffile =~ $_ } @dirty_etc_ok) {
+	push(@ok, $changed_conffile);
+    } elsif (grep { $changed_conffile =~ $_ } @dphys_config_ok) {
+	push(@ok_dpc, $changed_conffile);
+    } else {
+	push(@bad, $changed_conffile);
+    }
+}
+
+show_file_list('yellow', 'dirtyetc plugin configuration issues', @bad_config);
+show_file_list('yellow', 'Configuration files which are modified but should not be', @bad);
+show_file_list('green', 'Configuration files which are ok to be modified', @ok);
+show_file_list('green', 'Configuration files which are modified, but distributed via dphys-config', @ok_dpc);
+
+###
+### Finally send the result
+###
+
+$bb->send;
+
+###
+### Subroutines
+###
+
+sub show_file_list {
+    my ($color, $info, @list) = @_;
+
+    return unless @list;
+
+    $bb->color_line($color, "$info:\n\n");
+
+    foreach my $filename (@list) {
+	$bb->print("   $filename\n");
+    }
+
+    $bb->print("\n");
+}

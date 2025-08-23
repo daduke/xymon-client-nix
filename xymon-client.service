@@ -1,0 +1,21 @@
+[Unit]
+Description=Xymon systems and network monitor
+Documentation=man:xymon(7) man:xymonlaunch(8) man:xymon(1)
+After=network.target
+
+[Install]
+WantedBy=multi-user.target
+
+
+[Service]
+EnvironmentFile=/etc/default/xymon-client
+User=xymon
+ExecStartPre=/var/lib/xymon/init-common.sh
+ExecStart=/run/current-system/sw/bin/xymoncmd /run/current-system/sw/bin/xymonlaunch --no-daemon --config=/etc/xymon/clientlaunch.cfg --log=/var/log/xymon/clientlaunch.log --pidfile=/run/xymon/clientlaunch.pid
+ExecStopPost=/run/current-system/sw/bin/sh -c "kill $(/run/current-system/sw/bin/pidof vmstat)"
+Type=simple
+
+# Kill xymonlaunch, but don't send kills to the underlying procs, since they
+# might be doing important things (like writing checkpoints and flushing caches)
+KillMode=process
+SendSIGKILL=no

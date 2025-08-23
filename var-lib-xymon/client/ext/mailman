@@ -1,0 +1,78 @@
+#!/usr/bin/perl -w
+#
+# Xymon/Hobbit/BigBrother test which checks the existence of Mailman
+# "shunt" qfiles which e.g. let mailman package upgrades on Debian
+# fail and can cause quite some issues if you handle such a failed
+# package upgrade wrongly.
+#
+# Copyright (C) 2011-2013 Axel Beckert <abe@debian.org>
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following
+# conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+use strict;
+use Hobbit;
+
+my $qfilesdir = '/var/lib/mailman/qfiles';
+my $limit = 300; # Seconds
+
+# Setup environment
+$ENV{'PATH'} = '/bin:/sbin:/usr/bin:/usr/sbin';
+$ENV{'LC_ALL'} = 'C';
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+# Do nothing if mailman doesn't seem to be installed.
+exit 0 unless -d $qfilesdir;
+
+# Setup Hobbit test
+my $bb = new Hobbit('mailman');
+my $now = time();
+
+# Check if we can access all potential files
+if (opendir(QFILES, $qfilesdir)) {
+    while (my $dir = readdir(QFILES)) {
+	next if $dir =~ /^\./;
+	-r "$qfilesdir/$dir" or $bb->color_line('yellow', "Can't read $qfilesdir/$dir!\n");
+
+	my @qfiles = grep { !/^\./ } glob("$qfilesdir/$dir/*");
+	if (@qfiles) {
+	    $bb->print("Found Mailman queue files in $qfilesdir/$dir:\n<pre>");
+
+	    foreach my $file (@qfiles) {
+		if ($dir eq 'shunt') {
+		    $bb->color_line('red', "$file: ".localtime((stat($file))[9])."\n");
+		} else {
+		    my $stat = (stat($file))[9];
+		    my $color = $now-$stat > $limit ? 'yellow' : 'green';
+		    $bb->color_line($color, "$file: ".localtime($stat)."\n");
+		}
+	    }
+	    $bb->print("</pre>\n");
+	} else {
+	    $bb->color_line('green', "No Mailman queue files found in $qfilesdir/$dir/.\n");
+	}
+    }
+    closedir(QFILES);
+} else {
+    $bb->color_line('yellow', "Can't read $qfilesdir: $!\n");
+}
+
+$bb->send;
