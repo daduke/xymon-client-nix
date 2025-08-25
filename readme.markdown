@@ -30,9 +30,6 @@ and in `configuration.nix`:
     enable = true;
     xymonServers = [ "xymon-server-IP1" "xymon-server-IP2" ];
     clientHostname = "nixos-testing.daduke.org";
-    varLibDir = "/var/lib/xymon";
-    logDir = "/var/log/xymon";
-    user = "xymon";
   };
 ```
 
