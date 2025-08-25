@@ -42,7 +42,6 @@ If you'd like to use xymon extensions that rely on the `Hobbit.pm` module, I've 
 ```
   inputs = {
     Hobbit.url = "github:daduke/hobbit-module-nix";
-    xymon-client.inputs.nixpkgs.follows = "nixpkgs";
   };
 ```
 to your system `flake.nix` and
