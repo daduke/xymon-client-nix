@@ -10,6 +10,7 @@ In your system flake, add
 ```
   inputs = {
     xymon-client.url = "github:daduke/xymon-client-nix";
+    xymon-client.inputs.nixpkgs.follows = "nixpkgs";
   }
 
   outputs = { self, nixpkgs, xymon-client, ... }@inputs: {
@@ -34,3 +35,20 @@ and in `configuration.nix`:
     user = "xymon";
   };
 ```
+
+## Hobbit.pm Perl module
+
+If you'd like to use xymon extensions that rely on the `Hobbit.pm` module, I've got you covered too. Add
+```
+  inputs = {
+    Hobbit.url = "github:daduke/hobbit-module-nix";
+    xymon-client.inputs.nixpkgs.follows = "nixpkgs";
+  };
+```
+to your system `flake.nix` and
+```
+environment.systemPackages = with pkgs; [
+  inputs.Hobbit.packages.${pkgs.system}.hobbit
+];
+```
+to `configuration.nix`
