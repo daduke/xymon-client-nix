@@ -2,12 +2,35 @@
 
 ## Credits
 
-This is based on [Pierre's](https://plmlab.math.cnrs.fr/nix/xymon-client) nix package for xymon-client. He did the initial work to compile the xymon sources. I added everything else to get the client up and running under NixOS.
-
-## Building
-
-`nix build .#xymon-client`
+This is based on [Pierre's](https://plmlab.math.cnrs.fr/nix/xymon-client) nix package for xymon-client. He laid the groundwork to get xymon-client compiled from the xymon sources. I added a nix module to configure the client.
 
 ## Installation
 
+In your system flake, add
+```
+  inputs = {
+    xymon-client.url = "github:daduke/xymon-client-nix";
+  }
 
+  outputs = { self, nixpkgs, xymon-client, ... }@inputs: {
+    nixosConfigurations.nixos-testing = nixpkgs.lib.nixosSystem {
+      ...
+      modules = [
+        xymon-client.nixosModules.xymon
+      ];
+      ...
+    };
+  };
+```
+
+and in `configuration.nix`:
+```
+  services.xymon-client = {
+    enable = true;
+    xymonServers = [ "xymon-server-IP1" "xymon-server-IP2" ];
+    clientHostname = "nixos-testing.daduke.org";
+    varLibDir = "/var/lib/xymon";
+    logDir = "/var/log/xymon";
+    user = "xymon";
+  };
+```
