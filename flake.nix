@@ -1,7 +1,7 @@
 {
   description = "xymon-client for NixOS";
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs }@inputs:
   let
     system = "x86_64-linux";
     pkgs = nixpkgs.legacyPackages.${system};
@@ -13,10 +13,10 @@
       xymon-client = pkgs.stdenv.mkDerivation {
         pname = "xymon-client";
         version = "4.3.30";
-        buildInputs = with pkgs;[ pcre libtirpc];
+        buildInputs = with pkgs; [ pcre libtirpc ];
         CONFTYPE = "client";
-        XYMONUSER="$(whoami)";
-        XYMONTOPDIR="$(out)";
+        XYMONUSER = "xymon";
+        XYMONTOPDIR = "$(out)";
         XYMONHOSTIP = "127.0.0.1";
         PKGBUILD = "yes";
         configureFlags = [
@@ -34,56 +34,118 @@
         # these must be git committed or build will fail!
         etcxymon = ./etc-xymon;
         varlibxymon = ./var-lib-xymon;
-        defaultxymon = ./default-xymon;
-        service = ./xymon-client.service;
 
         installPhase = ''
           runHook preInstall
           make install DESTDIR=$out
           mkdir -p $out/etc/xymon
           mkdir -p $out/var/lib/xymon
-            mkdir -p $out/etc/default
-            mkdir -p $out/run/systemd/system
+          mkdir -p $out/etc/default
           cp -r $etcxymon/* $out/etc/xymon/
           cp -r $varlibxymon/* $out/var/lib/xymon/
-          cp $defaultxymon $out/etc/default/xymon-client
-          cp $service $out/run/systemd/system/xymon-client.service
           runHook postInstall
         '';
       };
     };
 
-    nixosModules.xymon = { config, pkgs, ... }: {
-      options = {};
-      config = {
-        # Deploy config files from the built package output to /etc/xymon
-        environment.etc."xymon".source = self.packages.${system}.xymon-client + "/etc/xymon";
-        environment.etc."default/xymon-client".source =
-             self.packages.${system}.xymon-client + "/etc/default/xymon-client";
- 
-        system.activationScripts.xymonVarLib.text = ''
-          mkdir -p /var/lib/xymon
-          cp -r ${self.packages.${system}.xymon-client}/var/lib/xymon/* /var/lib/xymon/
-          chown -R xymon: /var/lib/xymon
-          chmod u+rwx /var/lib/xymon/tmp
-        '';
- 
-        system.activationScripts.xymonService.text = ''
-          mkdir -p /run/systemd/system
-          cp ${self.packages.${system}.xymon-client}/run/systemd/system/xymon-client.service /run/systemd/system/xymon-client.service
-        '';
- 
-        system.activationScripts.xymonLog.text = ''
-          mkdir -p /var/log/xymon
-          chown xymon: /var/log/xymon
-        '';
- 
- 
-        # Ensure /run/xymon exists with proper permissions on system boot
-        systemd.tmpfiles.rules = [
-          "d /run/xymon 0755 xymon xymon -"
-        ];
+    nixosModules.xymon = { config, pkgs, lib, ... }:
+      let
+        cfg = config.services.xymon-client;
+        user = cfg.user or "xymon";
+        group = cfg.user or "xymon";
+        logDir = cfg.logDir or "/var/log/xymon";
+        varLibDir = cfg.varLibDir or "/var/lib/xymon";
+        environmentFile = "/etc/default/xymon-client";
+        xymonServers = cfg.xymonServers;
+        clientHostname = cfg.clientHostname;
+        xymonClientPackage = self.packages.${system}.xymon-client;
+      in {
+        options.services.xymon-client = {
+          enable = lib.mkEnableOption "Enable the xymon client service";
+          logDir = lib.mkOption {
+            type = lib.types.str;
+            description = "Log directory for xymon-client";
+            default = "/var/log/xymon";
+          };
+          varLibDir = lib.mkOption {
+            type = lib.types.str;
+            description = "Var lib directory for xymon-client";
+            default = "/var/lib/xymon";
+          };
+          user = lib.mkOption {
+            type = lib.types.str;
+            description = "User to own xymon files";
+            default = "xymon";
+          };
+          xymonServers = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            description = "Servers to connect to for xymon";
+          };
+          clientHostname = lib.mkOption {
+            type = lib.types.str;
+            description = "Client hostname for xymon";
+          };
+        };
+
+        config = lib.mkIf cfg.enable {
+          users.users.${user} = {
+            isSystemUser = true;
+            group = group;
+          };
+          users.groups.${group} = {};
+
+          environment.systemPackages = [
+            self.packages.${system}.xymon-client
+          ];
+  
+          environment.etc."xymon".source = self.packages.${system}.xymon-client + "/etc/xymon";
+      
+          environment.etc."default/xymon-client".text = ''
+            XYMONSERVERS="${lib.concatStringsSep " " xymonServers}"
+            CLIENTHOSTNAME="${clientHostname}"
+            MACHINEDOTS="${clientHostname}"
+            MACHINE="${clientHostname}"
+            XYMONCLIENTHOME="${varLibDir}/client"
+          '';
+      
+          system.activationScripts.xymonVarLib.text = ''
+            mkdir -p ${varLibDir}
+            cp -r ${self.packages.${system}.xymon-client}/var/lib/xymon/* ${varLibDir}/
+            chown -R ${user}:${group} ${varLibDir}
+            chmod u+rwx ${varLibDir}/tmp
+          '';
+  
+          system.activationScripts.xymonLog.text = ''
+            mkdir -p ${logDir}
+            chown ${user}:${group} ${logDir}
+          '';
+  
+          systemd.tmpfiles.rules = [
+            "d /run/xymon 0755 ${user} ${group} -"
+          ];
+  
+          systemd.services.xymon-client = {
+            enable = true;
+            description = "Xymon systems and network monitor";
+            documentation = [
+              "man:xymon(7)"
+              "man:xymonlaunch(8)"
+              "man:xymon(1)"
+            ];
+            after = [ "network.target" ];
+            wantedBy = [ "multi-user.target" ];
+            serviceConfig = {
+              EnvironmentFile = "${environmentFile}";
+              User = user;
+              ExecStartPre = "${varLibDir}/init-common.sh";
+              ExecStart = "${xymonClientPackage}/bin/xymoncmd ${xymonClientPackage}/bin/xymonlaunch --no-daemon --config=/etc/xymon/clientlaunch.cfg --log=${logDir}/clientlaunch.log --pidfile=/run/xymon/clientlaunch.pid";
+              ExecStopPost = "${pkgs.runtimeShell} -c 'kill $(${pkgs.procps}/bin/pidof vmstat)'";
+              Type = "simple";
+              KillMode = "process";
+              SendSIGKILL = "no";
+            };
+          };
+        };
       };
-    };
   };
 }
