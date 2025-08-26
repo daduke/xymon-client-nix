@@ -51,13 +51,7 @@
     nixosModules.xymon = { config, pkgs, lib, ... }:
       let
         cfg = config.services.xymon-client;
-        user = cfg.user or "xymon";
-        group = cfg.user or "xymon";
-        logDir = cfg.logDir or "/var/log/xymon";
-        varLibDir = cfg.varLibDir or "/var/lib/xymon";
         environmentFile = "/etc/default/xymon-client";
-        xymonServers = cfg.xymonServers;
-        clientHostname = cfg.clientHostname;
         xymonClientPackage = self.packages.${system}.xymon-client;
       in {
         options.services.xymon-client = {
@@ -88,11 +82,11 @@
         };
 
         config = lib.mkIf cfg.enable {
-          users.users.${user} = {
+          users.users.${cfg.user} = {
             isSystemUser = true;
-            group = group;
+            group = cfg.user;
           };
-          users.groups.${group} = {};
+          users.groups.${cfg.user} = {};
 
           environment.systemPackages = [
             self.packages.${system}.xymon-client
@@ -101,27 +95,27 @@
           environment.etc."xymon".source = self.packages.${system}.xymon-client + "/etc/xymon";
       
           environment.etc."default/xymon-client".text = ''
-            XYMONSERVERS="${lib.concatStringsSep " " xymonServers}"
-            CLIENTHOSTNAME="${clientHostname}"
-            MACHINEDOTS="${clientHostname}"
-            MACHINE="${clientHostname}"
-            XYMONCLIENTHOME="${varLibDir}/client"
+            XYMONSERVERS="${lib.concatStringsSep " " cfg.xymonServers}"
+            CLIENTHOSTNAME="${cfg.clientHostname}"
+            MACHINEDOTS="${cfg.clientHostname}"
+            MACHINE="${cfg.clientHostname}"
+            XYMONCLIENTHOME="${cfg.varLibDir}/client"
           '';
       
           system.activationScripts.xymonVarLib.text = ''
-            mkdir -p ${varLibDir}
-            cp -r ${self.packages.${system}.xymon-client}/var/lib/xymon/* ${varLibDir}/
-            chown -R ${user}:${group} ${varLibDir}
-            chmod u+rwx ${varLibDir}/tmp
+            mkdir -p ${cfg.varLibDir}
+            cp -r ${self.packages.${system}.xymon-client}/var/lib/xymon/* ${cfg.varLibDir}/
+            chown -R ${cfg.user}:${cfg.user} ${cfg.varLibDir}
+            chmod u+rwx ${cfg.varLibDir}/tmp
           '';
   
           system.activationScripts.xymonLog.text = ''
-            mkdir -p ${logDir}
-            chown ${user}:${group} ${logDir}
+            mkdir -p ${cfg.logDir}
+            chown ${cfg.user}:${cfg.user} ${cfg.logDir}
           '';
   
           systemd.tmpfiles.rules = [
-            "d /run/xymon 0755 ${user} ${group} -"
+            "d /run/xymon 0755 ${cfg.user} ${cfg.user} -"
           ];
   
           systemd.services.xymon-client = {
@@ -136,9 +130,9 @@
             wantedBy = [ "multi-user.target" ];
             serviceConfig = {
               EnvironmentFile = "${environmentFile}";
-              User = user;
-              ExecStartPre = "${varLibDir}/init-common.sh";
-              ExecStart = "${xymonClientPackage}/bin/xymoncmd ${xymonClientPackage}/bin/xymonlaunch --no-daemon --config=/etc/xymon/clientlaunch.cfg --log=${logDir}/clientlaunch.log --pidfile=/run/xymon/clientlaunch.pid";
+              User = cfg.user;
+              ExecStartPre = "${cfg.varLibDir}/init-common.sh";
+              ExecStart = "${xymonClientPackage}/bin/xymoncmd ${xymonClientPackage}/bin/xymonlaunch --no-daemon --config=/etc/xymon/clientlaunch.cfg --log=${cfg.logDir}/clientlaunch.log --pidfile=/run/xymon/clientlaunch.pid";
               ExecStopPost = "${pkgs.runtimeShell} -c 'kill $(${pkgs.procps}/bin/pidof vmstat)'";
               Type = "simple";
               KillMode = "process";
