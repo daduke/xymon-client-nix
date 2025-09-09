@@ -91,6 +91,8 @@
           environment.systemPackages = [
             self.packages.${system}.xymon-client
           ];
+
+          boot.kernelModules = [ "drivetemp" ];
   
           environment.etc."xymon".source = self.packages.${system}.xymon-client + "/etc/xymon";
       
