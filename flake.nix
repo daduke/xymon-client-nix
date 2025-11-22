@@ -14,7 +14,7 @@
         pname = "xymon-client";
         version = "4.3.30";
         buildInputs = with pkgs; [ pcre libtirpc ];
-        CONFTYPE = "client";
+        CONFTYPE = "server";
         XYMONUSER = "xymon";
         XYMONTOPDIR = "$(out)";
         XYMONHOSTIP = "127.0.0.1";
