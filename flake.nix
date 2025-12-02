@@ -13,7 +13,7 @@
       xymon-client = pkgs.stdenv.mkDerivation {
         pname = "xymon-client";
         version = "4.3.30";
-        buildInputs = with pkgs; [ pcre libtirpc ];
+        buildInputs = with pkgs; [ pcre libtirpc net-tools ];
         CONFTYPE = "server";
         XYMONUSER = "xymon";
         XYMONTOPDIR = "$(out)";
@@ -90,6 +90,7 @@
 
           environment.systemPackages = [
             self.packages.${system}.xymon-client
+            pkgs.net-tools
           ];
 
           boot.kernelModules = [ "drivetemp" ];
