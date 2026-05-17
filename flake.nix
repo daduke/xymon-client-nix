@@ -35,6 +35,11 @@
         etcxymon = ./etc-xymon;
         varlibxymon = ./var-lib-xymon;
 
+        # patch for gcc14 include
+        postPatch = ''
+          sed -i '1i#include <stdlib.h>' lib/suid.c
+        '';
+
         installPhase = ''
           runHook preInstall
           make install DESTDIR=$out
