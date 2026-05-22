@@ -27,7 +27,7 @@
         ];
         dontAddPrefix = true;
         src = builtins.fetchurl {
-          url = "https://netcologne.dl.sourceforge.net/project/xymon/Xymon/4.3.30/xymon-4.3.30.tar.gz";
+          url = "https://sf-eu-introserv-1.dl.sourceforge.net/project/xymon/Xymon/4.3.30/xymon-4.3.30.tar.gz";
           sha256 = "sha256:1xgm3ch2aqlmmkny3805c47ap1hjl9hjq1r5czwmvqg1r1qigmcf";
         };
 
